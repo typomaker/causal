@@ -1,127 +1,111 @@
-//go:build legacy
-
-package causal_test
+package causal
 
 import (
 	"context"
 	"testing"
-
-	"causal"
+	"time"
 )
 
-func BenchmarkCompile(b *testing.B) {
-	schema := causal.Schema(
-		causal.Func("clamp", func(_ context.Context, value, limit int64) (int64, error) {
-			if value > limit {
-				return limit, nil
-			}
-			return value, nil
-		}),
-		causal.Case("update",
-			causal.Skip("!enabled"),
-			causal.Self("value"),
-			causal.With("clamp(value + delta, limit)"),
-		),
-	)
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := causal.Compile(schema); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
 func BenchmarkDo(b *testing.B) {
-	benchmarks := []struct {
-		name   string
-		schema causal.Program
-		scope  func() *causal.Runtime
-	}{
-		{
-			name: "single_write",
-			schema: causal.Schema(causal.Case("run",
-				causal.Self("value"),
-				causal.With("value + 1"),
-			)),
-			scope: benchmarkIntScope,
-		},
-		{
-			name: "four_staged_writes",
-			schema: causal.Schema(causal.Case("run",
-				causal.Self("value"),
-				causal.With("value + 1"),
-				causal.With("value + 2"),
-				causal.With("value + 3"),
-				causal.With("value + 4"),
-			)),
-			scope: benchmarkIntScope,
-		},
-		{
-			name: "skip",
-			schema: causal.Schema(causal.Case("run",
-				causal.Skip("enabled"),
-				causal.Self("value"),
-				causal.With("value + 1"),
-			)),
-			scope: func() *causal.Runtime {
-				return causal.Scope(causal.State("enabled",
-					causal.Getter(func() bool { return true }),
-				))
-			},
-		},
-		{
-			name: "nested_case",
-			schema: causal.Schema(causal.Case("run",
-				causal.Self("value"),
-				causal.Case("nested",
-					causal.With("value + 1"),
-					causal.With("value + 2"),
-				),
-				causal.With("value + 3"),
-			)),
-			scope: benchmarkIntScope,
-		},
-		{
-			name: "custom_function",
-			schema: causal.Schema(
-				causal.Func("increment", func(_ context.Context, value int64) (int64, error) {
-					return value + 1, nil
-				}),
-				causal.Case("run",
-					causal.Self("value"),
-					causal.With("increment(value)"),
-				),
-			),
-			scope: benchmarkIntScope,
-		},
-	}
-
 	ctx := context.Background()
-	for _, benchmark := range benchmarks {
-		b.Run(benchmark.name, func(b *testing.B) {
-			engine, err := causal.Compile(benchmark.schema)
+	plain := func(name string, statements ...Statement) {
+		b.Run(name, func(b *testing.B) {
+			runtime, err := New(Symbol[int64]("value"), Case("run", statements...)).Compile()
 			if err != nil {
 				b.Fatal(err)
 			}
-			runtime := benchmark.scope()
-
+			value := int64(1)
+			binding := Bind("value", &value)
+			var scope Scope
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if err := engine.Do(ctx, runtime, "run"); err != nil {
+				if err := runtime.Do(ctx, &scope, "run", binding); err != nil {
 					b.Fatal(err)
 				}
 			}
 		})
 	}
+
+	plain("read-only", Skip("value > 0"))
+	plain("one With", Self("value"), With("value + 1"))
+	plain("multiple With", Self("value"), With("value + 1"), With("value + 2"), With("value + 3"))
+	plain("Skip", Skip("value < 0"), Self("value"), With("value + 1"))
+	plain("nested Case", Self("value"), Case("nested", With("value + 1"), With("value + 2")), With("value + 3"))
+
+	b.Run("function symbol", func(b *testing.B) {
+		runtime, err := New(Symbol[int64]("value"), Symbol[func(int64) int64]("increment"), Case("run", Self("value"), With("increment(value)"))).Compile()
+		if err != nil {
+			b.Fatal(err)
+		}
+		value := int64(1)
+		bindings := []Binding{Bind("value", &value), Bind("increment", func(v int64) int64 { return v + 1 })}
+		var scope Scope
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if err := runtime.Do(ctx, &scope, "run", bindings...); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("context+error function", func(b *testing.B) {
+		runtime, err := New(Symbol[int64]("value"), Symbol[func(context.Context, int64) (int64, error)]("increment"), Case("run", Self("value"), With("increment(value)"))).Compile()
+		if err != nil {
+			b.Fatal(err)
+		}
+		value := int64(1)
+		bindings := []Binding{Bind("value", &value), Bind("increment", func(_ context.Context, v int64) (int64, error) { return v + 1, nil })}
+		var scope Scope
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if err := runtime.Do(ctx, &scope, "run", bindings...); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	benchmarkWait(b, ctx, false)
+	benchmarkWait(b, ctx, true)
 }
 
-func benchmarkIntScope() *causal.Runtime {
-	var value int64
-	return causal.Scope(causal.State("value",
-		causal.Getter(func() int64 { return value }),
-		causal.Setter(func(next int64) { value = next }),
-	))
+func benchmarkWait(b *testing.B, ctx context.Context, resume bool) {
+	name := "Wait"
+	if resume {
+		name = "resume"
+	}
+	b.Run(name, func(b *testing.B) {
+		runtime, err := New(Symbol[int64]("value"), Case("run", Self("value"), With("value + 1"), Wait(`duration("1s")`), With("value + 1"))).Compile()
+		if err != nil {
+			b.Fatal(err)
+		}
+		value := int64(1)
+		binding := Bind("value", &value)
+		now := time.Unix(1, 0)
+		var continuationSeed continuation
+		if resume {
+			var seed Scope
+			seed.SetClock(func() time.Time { return now })
+			if err := runtime.Do(ctx, &seed, "run", binding); err != nil {
+				b.Fatal(err)
+			}
+			continuationSeed = seed.continuations["run"]
+			now = now.Add(time.Second)
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			var scope Scope
+			if resume {
+				scope = Scope{continuations: map[string]continuation{"run": continuationSeed}, clock: func() time.Time { return now }, runtimeVersion: runtime.version}
+			} else {
+				scope.SetClock(func() time.Time { return now })
+			}
+			if err := runtime.Do(ctx, &scope, "run", binding); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

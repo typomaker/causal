@@ -86,6 +86,7 @@ type symbolContract struct {
 	goType       reflect.Type
 	context      bool
 	returnsError bool
+	nativeArgs   []reflect.Type
 	err          error
 }
 
@@ -117,6 +118,7 @@ func contractForType(name string, t reflect.Type) (symbolContract, error) {
 				return c, fmt.Errorf("causal: function Symbol %q argument %d has unsupported type %v", name, i-first, t.In(i))
 			}
 			c.args = append(c.args, kind)
+			c.nativeArgs = append(c.nativeArgs, t.In(i))
 		}
 		if t.NumOut() != 1 && t.NumOut() != 2 {
 			return c, fmt.Errorf("causal: function Symbol %q must return R or (R, error)", name)

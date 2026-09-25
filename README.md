@@ -31,7 +31,7 @@ Go cases + JSON cases -> Program -> compiled Runtime
 
 Within an execution segment, reads are lazy and writes are staged. Expressions
 later in the segment see earlier staged values. All required bindings and all
-result types are validated before setters are called. Staged writes are applied
+result types are validated before pointers are changed. Staged writes are applied
 at root-case completion or immediately before a `Wait`.
 
 ## Basic case
@@ -40,11 +40,12 @@ A case selects a target with `Self` and computes its next value with `With`:
 
 ```go
 program := causal.New(
-    causal.Symbol[int64]("balance"),
-    causal.Symbol[int64]("amount"),
-    causal.Case("deposit",
-        causal.Self("balance"),
-        causal.With("balance + amount"),
+    causal.Symbol[int64]("health"),
+    causal.Symbol[int64]("damage"),
+    causal.Case(
+        "attack",
+        causal.Self("health"),
+        causal.With("health - damage"),
     ),
 )
 
@@ -54,9 +55,9 @@ if err != nil {
 }
 
 var scope causal.Scope
-err = runtime.Do(ctx, &scope, "deposit",
-    causal.Bind("balance", &account.Balance),
-    causal.Bind("amount", &command.Amount),
+err = runtime.Do(ctx, &scope, "attack",
+    causal.Bind("health", &health),
+    causal.Bind("damage", &damage),
 )
 ```
 
@@ -103,7 +104,7 @@ program := causal.New(
 )
 ```
 
-JSON represents composition with named case references:
+JSON represents composition with named cases:
 
 ```json
 {
@@ -162,7 +163,7 @@ combined := causal.New(fromJSON, fromGo)
 runtime, err := combined.Compile()
 ```
 
-References are resolved after composition, so a JSON case may refer to a case
+Case links are resolved after composition, so a JSON case may use a case
 defined in Go. A symbol may be declared in both JSON and Go when its CEL
 signature is identical; the Go declaration supplies the static binding type.
 Conflicting signatures and duplicate Go declarations are rejected. Case names
@@ -206,9 +207,14 @@ program := causal.New(
     ),
 )
 
-err := runtime.Do(ctx, &scope, "attack",
-    healthBinding,
-    damageBinding,
+runtime, err := program.Compile()
+if err != nil {
+    return err
+}
+
+err = runtime.Do(ctx, &scope, "attack",
+    causal.Bind("health", &character.Health),
+    causal.Bind("damage", &attack.Damage),
     causal.Bind("calculate_damage", calculateDamage),
 )
 ```
@@ -228,6 +234,7 @@ Value symbols use pointers, while function symbols use functions:
 
 ```go
 causal.Bind("health", &character.Health)
+causal.Bind("damage", &attack.Damage)
 causal.Bind("calculate_damage", calculateDamage)
 ```
 

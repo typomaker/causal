@@ -277,6 +277,81 @@ func TestPointerBindingAtomicityAndRepeatedWrite(t *testing.T) {
 	})
 }
 
+func TestPointerStagingSegments(t *testing.T) {
+	t.Run("snapshot is reused and pending wins", func(t *testing.T) {
+		value := int64(10)
+		program := causal.New(
+			causal.Symbol[int64]("value"),
+			causal.Symbol[func() int64]("mutate"),
+			causal.Case("run", causal.Self("value"), causal.With("value + value + mutate()"), causal.With("value + 1")),
+		)
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scope causal.Scope
+		err = runtime.Do(context.Background(), &scope, "run",
+			causal.Bind("value", &value),
+			causal.Bind("mutate", func() int64 { value = 100; return 1 }),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if value != 22 {
+			t.Fatalf("value=%d, want 22", value)
+		}
+	})
+
+	t.Run("Wait starts a fresh snapshot on resume", func(t *testing.T) {
+		now := time.Unix(100, 0)
+		value := int64(1)
+		program := causal.New(causal.Symbol[int64]("value"), causal.Case("run",
+			causal.Self("value"), causal.With("value + 1"), causal.Wait(`duration("1s")`), causal.With("value + 1"),
+		))
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scope causal.Scope
+		scope.SetClock(func() time.Time { return now })
+		binding := causal.Bind("value", &value)
+		if err := runtime.Do(context.Background(), &scope, "run", binding); err != nil {
+			t.Fatal(err)
+		}
+		if value != 2 {
+			t.Fatalf("committed value=%d", value)
+		}
+		value = 40
+		now = now.Add(time.Second)
+		if err := runtime.Do(context.Background(), &scope, "run", binding); err != nil {
+			t.Fatal(err)
+		}
+		if value != 41 {
+			t.Fatalf("resumed value=%d, want 41", value)
+		}
+	})
+
+	t.Run("validation does not invoke functions", func(t *testing.T) {
+		calls := 0
+		program := causal.New(
+			causal.Symbol[int64]("value"), causal.Symbol[func(int64) int64]("change"),
+			causal.Case("run", causal.Self("value"), causal.With("change(value)")),
+		)
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scope causal.Scope
+		err = runtime.Do(context.Background(), &scope, "run", causal.Bind("change", func(v int64) int64 { calls++; return v }))
+		if err == nil {
+			t.Fatal("missing value binding accepted")
+		}
+		if calls != 0 {
+			t.Fatalf("function called %d times during validation", calls)
+		}
+	})
+}
+
 func TestCompileValidation(t *testing.T) {
 	tests := []causal.Program{
 		causal.New(causal.Case("x", causal.With("1"))),

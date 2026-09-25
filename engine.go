@@ -3,7 +3,6 @@ package causal
 import (
 	"context"
 	"fmt"
-	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"reflect"
@@ -12,6 +11,16 @@ import (
 type segment struct {
 	snapshot, pending map[string]any
 	order             []string
+}
+
+type preparedBinding struct {
+	Binding
+	call functionCall
+}
+
+type expressionExecution struct {
+	context   context.Context
+	functions map[string]functionCall
 }
 
 // Do validates all bindings required by the complete root Case, then executes
@@ -57,7 +66,6 @@ func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ..
 		ins := cc.code[pc]
 		switch ins.kind {
 		case instWith:
-			b := bound[ins.target]
 			v, e := r.eval(ctx, bound, seg, ins)
 			if e != nil {
 				return fmt.Errorf("causal: case %q With %q: %w", name, ins.source, e)
@@ -66,7 +74,6 @@ func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ..
 				seg.order = append(seg.order, ins.target)
 			}
 			seg.pending[ins.target] = v
-			_ = b
 		case instSkip:
 			v, e := r.eval(ctx, bound, seg, ins)
 			if e != nil {
@@ -107,8 +114,8 @@ func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ..
 	return nil
 }
 
-func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[string]Binding, error) {
-	m := map[string]Binding{}
+func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[string]preparedBinding, error) {
+	m := map[string]preparedBinding{}
 	for _, b := range items {
 		if b.err != nil {
 			return nil, fmt.Errorf("invalid binding %q: %w", b.name, b.err)
@@ -127,9 +134,11 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[strin
 			if b.function == nil || b.value.IsValid() {
 				return nil, fmt.Errorf("function symbol %q binding must be a function", b.name)
 			}
-			if _, err := functionAdapter(c, b.function); err != nil {
+			call, err := functionAdapter(c, b.function)
+			if err != nil {
 				return nil, err
 			}
+			m[b.name] = preparedBinding{Binding: b, call: call}
 		} else {
 			if !b.value.IsValid() || b.function != nil {
 				return nil, fmt.Errorf("value symbol %q binding must be a non-nil pointer", b.name)
@@ -138,8 +147,8 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[strin
 			if !supported || kind != c.kind || c.goType != nil && b.valueType != c.goType {
 				return nil, fmt.Errorf("symbol %q binding type %v does not match %s", b.name, b.valueType, c.kind)
 			}
+			m[b.name] = preparedBinding{Binding: b}
 		}
-		m[b.name] = b
 	}
 	for n := range cc.requirements {
 		_, ok := m[n]
@@ -150,17 +159,9 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[strin
 	return m, nil
 }
 
-func (r *Runtime) eval(ctx context.Context, bound map[string]Binding, seg *segment, ins instruction) (ref.Val, error) {
-	activation := map[string]any{}
-	ids := map[string]struct{}{}
-	if err := addDeps(ins.ast, ids); err != nil {
-		return nil, err
-	}
-	for dep := range ids {
-		c, ok := r.contracts[dep]
-		if !ok || c.function {
-			continue
-		}
+func (r *Runtime) eval(ctx context.Context, bound map[string]preparedBinding, seg *segment, ins instruction) (ref.Val, error) {
+	activation := make(map[string]any, len(ins.expr.reads)+1)
+	for _, dep := range ins.expr.reads {
 		if v, ok := seg.pending[dep]; ok {
 			activation[dep] = v
 			continue
@@ -173,32 +174,14 @@ func (r *Runtime) eval(ctx context.Context, bound map[string]Binding, seg *segme
 		seg.snapshot[dep] = v
 		activation[dep] = v
 	}
-	opts := []cel.EnvOption{}
-	for n, c := range r.contracts {
-		if !c.function {
-			continue
+	if len(ins.expr.functions) != 0 {
+		calls := make(map[string]functionCall, len(ins.expr.functions))
+		for _, name := range ins.expr.functions {
+			calls[name] = bound[name].call
 		}
-		b, ok := bound[n]
-		if !ok {
-			continue
-		}
-		call, _ := functionAdapter(c, b.function)
-		args := make([]*cel.Type, len(c.args))
-		for i, kind := range c.args {
-			args[i] = celType(kind)
-		}
-		opts = append(opts, cel.Function(n, cel.Overload(overloadID(n), args, celType(c.result),
-			cel.FunctionBinding(func(args ...ref.Val) ref.Val { return call(ctx, args) }))))
+		activation[executionActivationName] = &expressionExecution{context: ctx, functions: calls}
 	}
-	evalEnv, e := r.env.Extend(opts...)
-	if e != nil {
-		return nil, e
-	}
-	p, e := evalEnv.Program(ins.ast)
-	if e != nil {
-		return nil, e
-	}
-	v, _, e := p.Eval(activation)
+	v, _, e := ins.expr.program.Eval(activation)
 	if e != nil {
 		return nil, e
 	}
@@ -207,7 +190,7 @@ func (r *Runtime) eval(ctx context.Context, bound map[string]Binding, seg *segme
 	}
 	return v, nil
 }
-func (r *Runtime) commit(ctx context.Context, s *Scope, bound map[string]Binding, seg *segment) error {
+func (r *Runtime) commit(ctx context.Context, s *Scope, bound map[string]preparedBinding, seg *segment) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -248,7 +231,7 @@ func functionAdapter(c symbolContract, fn any) (functionCall, error) {
 		if err != nil || !actual.function || actual.result != c.result || !sameKinds(actual.args, c.args) {
 			return nil, fmt.Errorf("function symbol %q implementation has incompatible CEL signature", c.symbol.Name)
 		}
-		c.context, c.returnsError = actual.context, actual.returnsError
+		c.context, c.returnsError, c.nativeArgs = actual.context, actual.returnsError, actual.nativeArgs
 	}
 	f := reflect.ValueOf(fn)
 	if f.IsNil() {
@@ -264,10 +247,7 @@ func functionAdapter(c symbolContract, fn any) (functionCall, error) {
 		}
 		for i, arg := range args {
 			value := reflect.ValueOf(arg.Value())
-			target := t.In(i)
-			if c.context {
-				target = t.In(i + 1)
-			}
+			target := c.nativeArgs[i]
 			if !value.IsValid() || !value.Type().ConvertibleTo(target) {
 				return types.NewErr("function %s: argument %d has incompatible type", c.symbol.Name, i)
 			}

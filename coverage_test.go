@@ -101,6 +101,53 @@ func TestNestedCasesReadinessAndFailures(t *testing.T) {
 	}
 }
 
+func TestCompiledExpressionMetadata(t *testing.T) {
+	program := New(
+		Symbol[int64]("health"), Symbol[int64]("base"), Symbol[int64]("armor"),
+		Symbol[func(int64, int64) int64]("damage"),
+		Case("attack", Self("health"), With("health - damage(base, armor)")),
+	)
+	runtime, err := program.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expr := runtime.cases["attack"].code[0].expr
+	if !reflect.DeepEqual(expr.reads, []string{"armor", "base", "health"}) {
+		t.Fatalf("reads=%v", expr.reads)
+	}
+	if !reflect.DeepEqual(expr.functions, []string{"damage"}) {
+		t.Fatalf("functions=%v", expr.functions)
+	}
+	if expr.program == nil {
+		t.Fatal("CEL program was not built during Compile")
+	}
+
+	env, err := cel.NewEnv(
+		cel.Variable("base", cel.IntType),
+		cel.Variable("xs", cel.ListType(cel.IntType)),
+		cel.Variable("m", cel.MapType(cel.StringType, cel.IntType)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{`xs.map(x, x + base)`, `m.key + base`, `[base, 1][0]`, `{"x": base}.x`} {
+		requirements := map[string]struct{}{}
+		compiled, compileErr := compileExpr(env, source, requirements)
+		if compileErr != nil {
+			t.Fatalf("compile %q: %v", source, compileErr)
+		}
+		if compiled.program == nil || len(compiled.reads) == 0 {
+			t.Fatalf("metadata for %q: %#v", source, compiled)
+		}
+	}
+	if _, err := compileExpr(env, " ", map[string]struct{}{}); err == nil {
+		t.Fatal("empty expression compiled")
+	}
+	if _, err := compileExpr(env, "missing", map[string]struct{}{}); err == nil {
+		t.Fatal("invalid expression compiled")
+	}
+}
+
 func TestASTReferenceAndCompileBranches(t *testing.T) {
 	p := Program{AST: ast.Program{Cases: []ast.Case{{Name: "x", Statements: []ast.Stmt{ast.CaseRef{Name: "y"}}}, {Name: "y"}}}}
 	if _, err := p.Compile(); err != nil {
@@ -118,22 +165,6 @@ func TestHelperAndErrorBranches(t *testing.T) {
 		if celType(k) == nil {
 			t.Fatal(k)
 		}
-	}
-	env, _ := cel.NewEnv(cel.Variable("xs", cel.ListType(cel.IntType)), cel.Variable("m", cel.MapType(cel.StringType, cel.IntType)))
-	for _, src := range []string{`xs.map(x, x+1)`, `m.a`, `{1: 2}`, `[1,2]`} {
-		a, iss := env.Compile(src)
-		if iss.Err() != nil {
-			t.Fatal(iss.Err())
-		}
-		ids := map[string]struct{}{}
-		if err := addDeps(a, ids); err != nil {
-			t.Fatal(err)
-		}
-		checked, err := cel.AstToCheckedExpr(a)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = expressionUsesFunction(checked.GetExpr(), "missing")
 	}
 	p := New(Symbol[int64]("v"), Case("x", Self("v"), With("v+1")))
 	r, _ := p.Compile()
