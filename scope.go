@@ -83,6 +83,16 @@ func (s *Scope) SetClock(c Clock) {
 	}
 }
 
+// Pending reports the deadline of a suspended root case. Applications use it
+// to persist and schedule a continuation without interpreting Scope JSON.
+func (s *Scope) Pending(name string) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.init()
+	continuation, exists := s.continuations[name]
+	return continuation.AvailableAt, exists
+}
+
 type scopeJSON struct {
 	RuntimeVersion string                  `json:"runtimeVersion,omitempty"`
 	Readiness      map[string]bool         `json:"readiness,omitempty"`

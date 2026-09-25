@@ -374,9 +374,16 @@ func TestScopeJSONContinuation(t *testing.T) {
 	r, _ := p.Compile()
 	b := causal.Bind("v", &v)
 	var s causal.Scope
+	if _, pending := s.Pending("x"); pending {
+		t.Fatal("zero scope has a pending continuation")
+	}
 	s.SetClock(func() time.Time { return now })
 	if err := r.Do(context.Background(), &s, "x", b); err != nil {
 		t.Fatal(err)
+	}
+	deadline, pending := s.Pending("x")
+	if !pending || !deadline.Equal(now.Add(time.Second)) {
+		t.Fatalf("pending deadline=%s exists=%t", deadline, pending)
 	}
 	data, _ := json.Marshal(&s)
 	var restored causal.Scope
@@ -386,6 +393,9 @@ func TestScopeJSONContinuation(t *testing.T) {
 	restored.SetClock(func() time.Time { return now.Add(time.Second) })
 	if err := r.Do(context.Background(), &restored, "x", b); err != nil {
 		t.Fatal(err)
+	}
+	if _, pending := restored.Pending("x"); pending {
+		t.Fatal("completed scope remains pending")
 	}
 	if v != 2 {
 		t.Fatalf("v=%d", v)
