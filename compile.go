@@ -119,7 +119,11 @@ func compile(program Program) (*Runtime, error) {
 			r.dependents[dep] = append(r.dependents[dep], def.Name)
 		}
 		for name, c := range contracts {
-			if c.function && usesFunction(cc.code, name) {
+			used, err := usesFunction(cc.code, name)
+			if err != nil {
+				return nil, err
+			}
+			if c.function && used {
 				cc.requirements[name] = bindingRequirement{function: true}
 			}
 		}
@@ -145,7 +149,9 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code 
 			if e != nil {
 				return self, e
 			}
-			addDeps(a, deps)
+			if err := addDeps(a, deps); err != nil {
+				return self, err
+			}
 			deps[self] = struct{}{}
 			q := req[self]
 			q.write = true
@@ -159,7 +165,9 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code 
 			if a.OutputType() != cel.BoolType {
 				return self, fmt.Errorf("Skip %q must return bool, got %v", s.Expression, a.OutputType())
 			}
-			addDeps(a, deps)
+			if err := addDeps(a, deps); err != nil {
+				return self, err
+			}
 			*code = append(*code, instruction{kind: instSkip, source: s.Expression, ast: a, jump: -1})
 		case ast.Wait:
 			a, e := compileExpr(env, s.Expression)
@@ -169,7 +177,9 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code 
 			if a.OutputType() != cel.DurationType {
 				return self, fmt.Errorf("Wait %q must return duration, got %v", s.Expression, a.OutputType())
 			}
-			addDeps(a, deps)
+			if err := addDeps(a, deps); err != nil {
+				return self, err
+			}
 			*code = append(*code, instruction{kind: instWait, source: s.Expression, ast: a})
 		case ast.Case:
 			var e error
@@ -241,7 +251,14 @@ func compileExpr(env *cel.Env, src string) (*cel.Ast, error) {
 	}
 	return a, nil
 }
-func addDeps(a *cel.Ast, out map[string]struct{}) { collectIdentifiers(a.Expr(), nil, out) }
+func addDeps(a *cel.Ast, out map[string]struct{}) error {
+	checked, err := cel.AstToCheckedExpr(a)
+	if err != nil {
+		return err
+	}
+	collectIdentifiers(checked.GetExpr(), nil, out)
+	return nil
+}
 func collectIdentifiers(e *exprpb.Expr, locals map[string]bool, out map[string]struct{}) {
 	if e == nil {
 		return
@@ -280,13 +297,20 @@ func collectIdentifiers(e *exprpb.Expr, locals map[string]bool, out map[string]s
 		collectIdentifiers(x.ComprehensionExpr.Result, n, out)
 	}
 }
-func usesFunction(code []instruction, name string) bool {
+func usesFunction(code []instruction, name string) (bool, error) {
 	for _, i := range code {
-		if i.ast != nil && expressionUsesFunction(i.ast.Expr(), name) {
-			return true
+		if i.ast == nil {
+			continue
+		}
+		checked, err := cel.AstToCheckedExpr(i.ast)
+		if err != nil {
+			return false, err
+		}
+		if expressionUsesFunction(checked.GetExpr(), name) {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 func expressionUsesFunction(e *exprpb.Expr, name string) bool {
 	if e == nil {
@@ -334,7 +358,7 @@ func programVersion(p Program) string {
 	sort.Strings(names)
 	for _, n := range names {
 		c := m[n]
-		fmt.Fprintf(h, "%s:%s:%v:%s:%v;", n, c.kind, c.args, c.result, c.goType)
+		_, _ = fmt.Fprintf(h, "%s:%s:%v:%s:%v;", n, c.kind, c.args, c.result, c.goType)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

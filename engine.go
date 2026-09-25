@@ -6,7 +6,6 @@ import (
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
-	"github.com/google/cel-go/interpreter/functions"
 	"reflect"
 )
 
@@ -156,7 +155,9 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[strin
 func (r *Runtime) eval(ctx context.Context, bound map[string]Binding, seg *segment, ins instruction) (ref.Val, error) {
 	activation := map[string]any{}
 	ids := map[string]struct{}{}
-	addDeps(ins.ast, ids)
+	if err := addDeps(ins.ast, ids); err != nil {
+		return nil, err
+	}
 	for dep := range ids {
 		c, ok := r.contracts[dep]
 		if !ok || c.function {
@@ -174,7 +175,7 @@ func (r *Runtime) eval(ctx context.Context, bound map[string]Binding, seg *segme
 		seg.snapshot[dep] = v
 		activation[dep] = v
 	}
-	ovs := []*functions.Overload{}
+	opts := []cel.EnvOption{}
 	for n, c := range r.contracts {
 		if !c.function {
 			continue
@@ -184,9 +185,18 @@ func (r *Runtime) eval(ctx context.Context, bound map[string]Binding, seg *segme
 			continue
 		}
 		call, _ := functionAdapter(c, b.function)
-		ovs = append(ovs, &functions.Overload{Operator: overloadID(n), Function: func(args ...ref.Val) ref.Val { return call(ctx, args) }})
+		args := make([]*cel.Type, len(c.args))
+		for i, kind := range c.args {
+			args[i] = celType(kind)
+		}
+		opts = append(opts, cel.Function(n, cel.Overload(overloadID(n), args, celType(c.result),
+			cel.FunctionBinding(func(args ...ref.Val) ref.Val { return call(ctx, args) }))))
 	}
-	p, e := r.env.Program(ins.ast, cel.Functions(ovs...))
+	evalEnv, e := r.env.Extend(opts...)
+	if e != nil {
+		return nil, e
+	}
+	p, e := evalEnv.Program(ins.ast)
 	if e != nil {
 		return nil, e
 	}

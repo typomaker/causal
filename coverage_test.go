@@ -125,8 +125,14 @@ func TestHelperAndErrorBranches(t *testing.T) {
 			t.Fatal(iss.Err())
 		}
 		ids := map[string]struct{}{}
-		addDeps(a, ids)
-		_ = expressionUsesFunction(a.Expr(), "missing")
+		if err := addDeps(a, ids); err != nil {
+			t.Fatal(err)
+		}
+		checked, err := cel.AstToCheckedExpr(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = expressionUsesFunction(checked.GetExpr(), "missing")
 	}
 	p := New(Symbol[int64]("v"), Case("x", Self("v"), With("v+1")))
 	r, _ := p.Compile()
