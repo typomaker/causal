@@ -88,3 +88,15 @@ propagates to the caller. They must also obey the callback contract: getters and
 setters are in-memory accessors, while a `Func` must not perform side effects
 that would need rollback. Causal rollback covers staged State writes; it cannot
 undo effects performed inside callbacks.
+
+## Benchmarks
+
+Run the compilation and execution benchmarks with allocation statistics:
+
+```sh
+go test -run '^$' -bench . -benchmem
+```
+
+Use `-count` and `benchstat` when comparing two revisions to reduce measurement
+noise. For example, save each revision with `-count 10` and compare the output
+files with `benchstat before.txt after.txt`.
