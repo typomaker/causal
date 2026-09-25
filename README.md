@@ -69,12 +69,9 @@ and the ergonomic `causal.Program` wrapper work with `encoding/json`.
 ```json
 {
   "@symbol": {
-    "health": { "type": "double" },
-    "damage": { "type": "double" },
-    "calculate_damage": {
-      "args": ["double", "double"],
-      "result": "double"
-    }
+    "health": "double",
+    "damage": "double",
+    "calculate_damage": "(double,double)double"
   },
   "attack": [
     { "self": "health" },
@@ -84,10 +81,11 @@ and the ergonomic `causal.Program` wrapper work with `encoding/json`.
 ```
 
 The optional global `@symbol` object makes a JSON program independently
-compilable. Value symbols declare `type`; function symbols declare their CEL
-`args` and `result`. Go implementations, bindings, compiled CEL, continuations,
-and other runtime metadata remain excluded. JSON without `@symbol` stays valid
-and can be composed with Go `Symbol[T]` declarations through `causal.New`.
+compilable. A value symbol is written as its CEL type. A function symbol uses
+the canonical `(arg,...)result` signature; `context.Context` and `error` are
+not part of it. Go implementations, bindings, compiled CEL, continuations, and
+other runtime metadata remain excluded. JSON without `@symbol` stays valid and
+can be composed with Go `Symbol[T]` declarations through `causal.New`.
 
 ## Scope persistence
 

@@ -76,7 +76,7 @@ func TestASTJSONCanonical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) != `{"@symbol":{"health":{"type":"double"}},"attack":[{"self":"health"},{"with":"health-1.0"}]}` {
+	if string(b) != `{"@symbol":{"health":"double"},"attack":[{"self":"health"},{"with":"health-1.0"}]}` {
 		t.Fatalf("json=%s", b)
 	}
 	var tree ast.Program
@@ -97,7 +97,7 @@ func TestASTJSONCanonical(t *testing.T) {
 }
 
 func TestCompleteProgramFromJSON(t *testing.T) {
-	source := `{"@symbol":{"value":{"type":"string"},"choose":{"args":["string","bool","uint"],"result":"string"}},"x":[{"self":"value"},{"with":"choose(\"ok\",true,2u)"}]}`
+	source := `{"@symbol":{"value":"string","choose":"(string,bool,uint)string"},"x":[{"self":"value"},{"with":"choose(\"ok\",true,2u)"}]}`
 	var program causal.Program
 	if err := json.Unmarshal([]byte(source), &program); err != nil {
 		t.Fatal(err)

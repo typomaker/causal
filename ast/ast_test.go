@@ -44,7 +44,7 @@ func TestJSONAllStatementsAndErrors(t *testing.T) {
 			t.Fatal("accepted invalid symbols")
 		}
 	}
-	for _, source := range []string{`{"@symbol":null}`, `{"@symbol":[]}`, `{"@symbol":{"":{"type":"int"}}}`, `{"@symbol":{"x":{}}}`, `{"@symbol":{"x":{"type":"int","result":"int"}}}`} {
+	for _, source := range []string{`{"@symbol":null}`, `{"@symbol":[]}`, `{"@symbol":{"":"int"}}`, `{"@symbol":{"x":""}}`, `{"@symbol":{"x":"(int"}}`, `{"@symbol":{"x":"(int,)int"}}`, `{"@symbol":{"x":"()"}}`, `{"@symbol":{"x":"int()"}}`} {
 		var program Program
 		if json.Unmarshal([]byte(source), &program) == nil {
 			t.Fatalf("accepted %s", source)

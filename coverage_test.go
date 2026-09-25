@@ -189,7 +189,7 @@ func TestFunctionContractValidation(t *testing.T) {
 		t.Fatal()
 	}
 	var program Program
-	if json.Unmarshal([]byte(`{"@symbol":{"x":{"type":"bad"}},"x":[]}`), &program) == nil {
+	if json.Unmarshal([]byte(`{"@symbol":{"x":"bad"},"x":[]}`), &program) == nil {
 		t.Fatal()
 	}
 }

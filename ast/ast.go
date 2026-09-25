@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 type Program struct {
@@ -38,16 +39,11 @@ func (Wait) isStmt()    {}
 func (CaseRef) isStmt() {}
 
 type stmtJSON map[string]string
-type symbolJSON struct {
-	Type      string   `json:"type,omitempty"`
-	Arguments []string `json:"args,omitempty"`
-	Result    string   `json:"result,omitempty"`
-}
 
 func (p Program) MarshalJSON() ([]byte, error) {
 	out := make(map[string]any)
 	if len(p.Symbols) > 0 {
-		symbols := make(map[string]symbolJSON, len(p.Symbols))
+		symbols := make(map[string]string, len(p.Symbols))
 		for _, symbol := range p.Symbols {
 			if symbol.Name == "" {
 				return nil, fmt.Errorf("causal: symbol name is empty")
@@ -55,11 +51,11 @@ func (p Program) MarshalJSON() ([]byte, error) {
 			if _, exists := symbols[symbol.Name]; exists {
 				return nil, fmt.Errorf("causal: duplicate symbol %q", symbol.Name)
 			}
-			if symbol.Function {
-				symbols[symbol.Name] = symbolJSON{Arguments: append([]string{}, symbol.Arguments...), Result: symbol.Result}
-			} else {
-				symbols[symbol.Name] = symbolJSON{Type: symbol.Type}
+			signature, err := formatSymbolSignature(symbol)
+			if err != nil {
+				return nil, err
 			}
+			symbols[symbol.Name] = signature
 		}
 		out["@symbol"] = symbols
 	}
@@ -122,7 +118,7 @@ func (p *Program) UnmarshalJSON(data []byte) error {
 	var symbols []Symbol
 	for _, name := range names {
 		if name == "@symbol" {
-			var declarations map[string]symbolJSON
+			var declarations map[string]string
 			if err := json.Unmarshal(encoded[name], &declarations); err != nil || declarations == nil {
 				return fmt.Errorf("causal: @symbol must be an object")
 			}
@@ -135,12 +131,11 @@ func (p *Program) UnmarshalJSON(data []byte) error {
 				if symbolName == "" {
 					return fmt.Errorf("causal: symbol name is empty")
 				}
-				declaration := declarations[symbolName]
-				function := declaration.Result != "" || declaration.Arguments != nil
-				if function == (declaration.Type != "") {
-					return fmt.Errorf("causal: symbol %q must declare either type or function signature", symbolName)
+				symbol, err := parseSymbolSignature(symbolName, declarations[symbolName])
+				if err != nil {
+					return err
 				}
-				symbols = append(symbols, Symbol{Name: symbolName, Type: declaration.Type, Function: function, Arguments: declaration.Arguments, Result: declaration.Result})
+				symbols = append(symbols, symbol)
 			}
 			continue
 		}
@@ -189,4 +184,55 @@ func (p *Program) UnmarshalJSON(data []byte) error {
 	}
 	p.Symbols, p.Cases = symbols, cases
 	return nil
+}
+
+func formatSymbolSignature(symbol Symbol) (string, error) {
+	if !symbol.Function {
+		if strings.TrimSpace(symbol.Type) == "" {
+			return "", fmt.Errorf("causal: symbol %q type is empty", symbol.Name)
+		}
+		return symbol.Type, nil
+	}
+	if strings.TrimSpace(symbol.Result) == "" {
+		return "", fmt.Errorf("causal: function symbol %q result is empty", symbol.Name)
+	}
+	for i, argument := range symbol.Arguments {
+		if strings.TrimSpace(argument) == "" {
+			return "", fmt.Errorf("causal: function symbol %q argument %d is empty", symbol.Name, i)
+		}
+	}
+	return "(" + strings.Join(symbol.Arguments, ",") + ")" + symbol.Result, nil
+}
+
+func parseSymbolSignature(name, signature string) (Symbol, error) {
+	signature = strings.TrimSpace(signature)
+	if signature == "" {
+		return Symbol{}, fmt.Errorf("causal: symbol %q signature is empty", name)
+	}
+	if !strings.HasPrefix(signature, "(") {
+		if strings.ContainsAny(signature, "(),") {
+			return Symbol{}, fmt.Errorf("causal: symbol %q has invalid value signature %q", name, signature)
+		}
+		return Symbol{Name: name, Type: signature}, nil
+	}
+	close := strings.IndexByte(signature, ')')
+	if close < 0 || close == len(signature)-1 || strings.Contains(signature[close+1:], ")") {
+		return Symbol{}, fmt.Errorf("causal: function symbol %q has invalid signature %q", name, signature)
+	}
+	result := strings.TrimSpace(signature[close+1:])
+	if result == "" || strings.ContainsAny(result, "(),") {
+		return Symbol{}, fmt.Errorf("causal: function symbol %q has invalid result %q", name, result)
+	}
+	var arguments []string
+	inside := strings.TrimSpace(signature[1:close])
+	if inside != "" {
+		for i, argument := range strings.Split(inside, ",") {
+			argument = strings.TrimSpace(argument)
+			if argument == "" || strings.ContainsAny(argument, "()") {
+				return Symbol{}, fmt.Errorf("causal: function symbol %q has invalid argument %d", name, i)
+			}
+			arguments = append(arguments, argument)
+		}
+	}
+	return Symbol{Name: name, Function: true, Arguments: arguments, Result: result}, nil
 }
