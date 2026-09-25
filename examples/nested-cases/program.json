@@ -1,0 +1,25 @@
+{
+  "@symbol": {
+    "energy": "int",
+    "health": "int",
+    "score": "int"
+  },
+  "game_turn": [
+    { "case": "heal" },
+    { "case": "complete_quest" }
+  ],
+  "heal": [
+    { "self": "health" },
+    { "with": "health + 20" },
+    { "self": "energy" },
+    { "with": "energy - 5" }
+  ],
+  "complete_quest": [
+    { "self": "score" },
+    { "with": "score + 100" },
+    { "self": "energy" },
+    { "with": "energy + 2" },
+    { "self": "health" },
+    { "with": "health + 5" }
+  ]
+}
