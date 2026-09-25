@@ -39,10 +39,14 @@ func TestJSONAllStatementsAndErrors(t *testing.T) {
 	if _, err := json.Marshal(Program{Cases: []Case{{Name: "x"}, {Name: "x"}}}); err == nil {
 		t.Fatal("accepted duplicate")
 	}
-	for _, program := range []Program{{Symbols: []Symbol{{Name: "", Type: "int"}}}, {Symbols: []Symbol{{Name: "x", Type: "int"}, {Name: "x", Type: "int"}}}} {
+	for _, program := range []Program{{Symbols: []Symbol{{Name: "", Type: "int"}}}, {Symbols: []Symbol{{Name: "x", Type: "int"}, {Name: "x", Type: "double"}}}} {
 		if _, err := json.Marshal(program); err == nil {
 			t.Fatal("accepted invalid symbols")
 		}
+	}
+	duplicate, err := json.Marshal(Program{Symbols: []Symbol{{Name: "x", Type: "int"}, {Name: "x", Type: "int"}}})
+	if err != nil || string(duplicate) != `{"@symbol":{"x":"int"}}` {
+		t.Fatalf("matching symbols were not merged: %s, %v", duplicate, err)
 	}
 	for _, source := range []string{`{"@symbol":null}`, `{"@symbol":[]}`, `{"@symbol":{"":"int"}}`, `{"@symbol":{"x":""}}`, `{"@symbol":{"x":"(int"}}`, `{"@symbol":{"x":"(int,)int"}}`, `{"@symbol":{"x":"()"}}`, `{"@symbol":{"x":"int()"}}`} {
 		var program Program

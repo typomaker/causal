@@ -128,6 +128,50 @@ func TestCompleteProgramFromJSON(t *testing.T) {
 	}
 }
 
+func TestMatchingJSONAndGoSymbolsAreMerged(t *testing.T) {
+	var fromJSON causal.Program
+	source := `{"@symbol":{"increment":"(int)int","value":"int"},"x":[{"self":"value"},{"with":"increment(value)"}]}`
+	if err := json.Unmarshal([]byte(source), &fromJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	program := causal.New(
+		fromJSON,
+		causal.Symbol[int64]("value"),
+		causal.Symbol[func(context.Context, int64) (int64, error)]("increment"),
+	)
+	runtime, err := program.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	value := int64(1)
+	state := causal.Bind("value", causal.Getter(func() int64 { return value }), causal.Setter(func(next int64) { value = next }))
+	var scope causal.Scope
+	if err := runtime.Do(context.Background(), &scope, "x", state, causal.Bind("increment", func(int64) int64 { return 0 })); err == nil {
+		t.Fatal("merged function symbol lost its Go signature")
+	}
+	if err := runtime.Do(context.Background(), &scope, "x", state, causal.Bind("increment", func(_ context.Context, current int64) (int64, error) {
+		return current + 1, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if value != 2 {
+		t.Fatalf("value=%d", value)
+	}
+}
+
+func TestConflictingJSONAndGoSymbolsAreRejected(t *testing.T) {
+	var fromJSON causal.Program
+	if err := json.Unmarshal([]byte(`{"@symbol":{"value":"int"},"x":[]}`), &fromJSON); err != nil {
+		t.Fatal(err)
+	}
+	_, err := causal.New(fromJSON, causal.Symbol[float64]("value")).Compile()
+	if err == nil || !strings.Contains(err.Error(), "conflicting declarations") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestBindingValidationAndZeroScope(t *testing.T) {
 	p := causal.New(causal.Symbol[int64]("v"), causal.Case("x", causal.Self("v"), causal.With("v+1")))
 	r, err := p.Compile()

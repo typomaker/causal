@@ -54,8 +54,17 @@ func compile(program Program) (*Runtime, error) {
 		if c.symbol.Name == "" {
 			return nil, fmt.Errorf("causal: symbol name is empty")
 		}
-		if _, ok := contracts[c.symbol.Name]; ok {
-			return nil, fmt.Errorf("causal: duplicate symbol %q", c.symbol.Name)
+		if existing, ok := contracts[c.symbol.Name]; ok {
+			if !sameSymbolSignature(existing, c) {
+				return nil, fmt.Errorf("causal: conflicting declarations for symbol %q", c.symbol.Name)
+			}
+			if existing.goType != nil && c.goType != nil {
+				return nil, fmt.Errorf("causal: duplicate Go symbol %q", c.symbol.Name)
+			}
+			if existing.goType == nil && c.goType != nil {
+				contracts[c.symbol.Name] = c
+			}
+			continue
 		}
 		contracts[c.symbol.Name] = c
 	}
@@ -103,7 +112,7 @@ func compile(program Program) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Runtime{env: env, cases: map[string]*compiledCase{}, contracts: contracts, dependents: map[string][]string{}, version: programVersion(program)}
+	r := &Runtime{env: env, cases: map[string]*compiledCase{}, contracts: contracts, dependents: map[string][]string{}, version: programVersion(program, contracts)}
 	for _, def := range program.AST.Cases {
 		cc := &compiledCase{name: def.Name, deps: map[string]struct{}{}, requirements: map[string]bindingRequirement{}}
 		if _, err := compileStatements(env, def, defs, &cc.code, cc.deps, cc.requirements, "", []string{def.Name}); err != nil {
@@ -345,19 +354,27 @@ func expressionUsesFunction(e *exprpb.Expr, name string) bool {
 	}
 	return false
 }
-func programVersion(p Program) string {
+func sameSymbolSignature(a, b symbolContract) bool {
+	if a.function != b.function {
+		return false
+	}
+	if a.function {
+		return a.result == b.result && sameKinds(a.args, b.args)
+	}
+	return a.kind == b.kind
+}
+
+func programVersion(p Program, contracts map[string]symbolContract) string {
 	b, _ := p.MarshalJSON()
 	h := sha256.New()
 	h.Write(b)
-	names := make([]string, 0, len(p.contracts))
-	m := map[string]symbolContract{}
-	for _, c := range p.contracts {
-		names = append(names, c.symbol.Name)
-		m[c.symbol.Name] = c
+	names := make([]string, 0, len(contracts))
+	for name := range contracts {
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		c := m[n]
+		c := contracts[n]
 		_, _ = fmt.Fprintf(h, "%s:%s:%v:%s:%v;", n, c.kind, c.args, c.result, c.goType)
 	}
 	return hex.EncodeToString(h.Sum(nil))

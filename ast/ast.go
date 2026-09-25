@@ -48,12 +48,15 @@ func (p Program) MarshalJSON() ([]byte, error) {
 			if symbol.Name == "" {
 				return nil, fmt.Errorf("causal: symbol name is empty")
 			}
-			if _, exists := symbols[symbol.Name]; exists {
-				return nil, fmt.Errorf("causal: duplicate symbol %q", symbol.Name)
-			}
 			signature, err := formatSymbolSignature(symbol)
 			if err != nil {
 				return nil, err
+			}
+			if existing, exists := symbols[symbol.Name]; exists {
+				if existing != signature {
+					return nil, fmt.Errorf("causal: conflicting declarations for symbol %q", symbol.Name)
+				}
+				continue
 			}
 			symbols[symbol.Name] = signature
 		}

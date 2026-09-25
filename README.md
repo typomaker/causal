@@ -155,6 +155,8 @@ if err := json.Unmarshal(source, &fromJSON); err != nil {
 }
 
 fromGo := causal.New(
+    causal.Symbol[int64]("health"),
+    causal.Symbol[int64]("energy"),
     causal.Case("heal",
         causal.Self("health"),
         causal.With("health + 20"),
@@ -168,8 +170,10 @@ runtime, err := combined.Compile()
 ```
 
 References are resolved after composition, so a JSON case may refer to a case
-defined in Go. Symbol and case names must remain unique in the combined program.
-A complete, executable version is maintained as an
+defined in Go. A symbol may be declared in both JSON and Go when its CEL
+signature is identical; the Go declaration supplies the static binding type.
+Conflicting signatures and duplicate Go declarations are rejected. Case names
+must remain unique. A complete, executable version is maintained as an
 [`Example` test](examples/nested-cases/example_test.go).
 
 ## Conditions and delayed continuation

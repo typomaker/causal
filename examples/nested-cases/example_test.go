@@ -19,6 +19,9 @@ func Example() {
 	}
 
 	fromGo := causal.New(
+		causal.Symbol[int64]("health"),
+		causal.Symbol[int64]("energy"),
+		causal.Symbol[int64]("score"),
 		causal.Case("heal",
 			causal.Self("health"),
 			causal.With("health + 20"),
