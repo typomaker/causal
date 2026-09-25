@@ -6,5 +6,5 @@ These rules are mandatory for every change to this project.
 2. New or modified production code must have at least 90% statement coverage from automated tests. Measure coverage before completing the task.
 3. Run `golangci-lint run` and resolve all reported issues before completing the task.
 4. Create releases by creating a version tag and pushing that tag to the repository. Do not publish a release from an untagged revision.
-5. Commit all completed task changes before declaring the task complete.
+5. After every completed task, commit all task changes and push the resulting commit to the configured remote before declaring the task complete.
 6. Write all project documentation in English, including comments intended as documentation, guides, policies, and release notes.
