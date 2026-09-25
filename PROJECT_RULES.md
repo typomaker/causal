@@ -4,6 +4,7 @@ These rules are mandatory for every change to this project.
 
 1. Prefer explicit types, static interfaces, and compile-time type handling. Runtime reflection may be used only with explicit user approval. Reflection is approved for inspecting and invoking function-symbol signatures in `Symbol[T]` and `Bind` because Go generics cannot decompose arbitrary function types.
 2. New or modified production code must have at least 90% statement coverage from automated tests. Measure coverage before completing the task.
-3. Create releases by creating a version tag and pushing that tag to the repository. Do not publish a release from an untagged revision.
-4. Commit all completed task changes before declaring the task complete.
-5. Write all project documentation in English, including comments intended as documentation, guides, policies, and release notes.
+3. Run `golangci-lint run` and resolve all reported issues before completing the task.
+4. Create releases by creating a version tag and pushing that tag to the repository. Do not publish a release from an untagged revision.
+5. Commit all completed task changes before declaring the task complete.
+6. Write all project documentation in English, including comments intended as documentation, guides, policies, and release notes.
