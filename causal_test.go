@@ -27,8 +27,8 @@ func TestStagingPendingAndLocalSkip(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := causal.Scope(
-		causal.State("health", causal.Getter(func(context.Context) int64 { return health }), causal.Setter(func(_ context.Context, v int64) { health = v })),
-		causal.State("armor", causal.Getter(func(context.Context) int64 { return armor })),
+		causal.State("health", causal.Getter(func() int64 { return health }), causal.Setter(func(v int64) { health = v })),
+		causal.State("armor", causal.Getter(func() int64 { return armor })),
 	)
 	if err := e.Do(ctx, s, "root"); err != nil {
 		t.Fatal(err)
@@ -48,8 +48,8 @@ func TestSelfFlowsThroughNestedCase(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := causal.Scope(causal.State("value",
-		causal.Getter(func(context.Context) int64 { return value }),
-		causal.Setter(func(_ context.Context, v int64) { value = v }),
+		causal.Getter(func() int64 { return value }),
+		causal.Setter(func(v int64) { value = v }),
 	))
 	if err := e.Do(context.Background(), s, "root"); err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func TestWaitCommitsAndResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := causal.Scope(causal.State("value", causal.Getter(func(context.Context) int64 { return value }), causal.Setter(func(_ context.Context, v int64) { value = v })))
+	s := causal.Scope(causal.State("value", causal.Getter(func() int64 { return value }), causal.Setter(func(v int64) { value = v })))
 	s.SetClock(func() time.Time { return now })
 	if err := e.Do(context.Background(), s, "process"); err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func TestFunctionErrorDoesNotCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := causal.Scope(causal.State("v", causal.Getter(func(context.Context) int64 { return v }), causal.Setter(func(_ context.Context, x int64) { v = x })))
+	s := causal.Scope(causal.State("v", causal.Getter(func() int64 { return v }), causal.Setter(func(x int64) { v = x })))
 	if err := e.Do(context.Background(), s, "x"); err == nil {
 		t.Fatal("expected error")
 	}
@@ -124,8 +124,8 @@ func TestDependencyMarksReadyButDoesNotRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := causal.Scope(
-		causal.State("a", causal.Getter(func(context.Context) int64 { return a }), causal.Setter(func(_ context.Context, v int64) { a = v })),
-		causal.State("b", causal.Getter(func(context.Context) int64 { return b }), causal.Setter(func(_ context.Context, v int64) { b = v })),
+		causal.State("a", causal.Getter(func() int64 { return a }), causal.Setter(func(v int64) { a = v })),
+		causal.State("b", causal.Getter(func() int64 { return b }), causal.Setter(func(v int64) { b = v })),
 	)
 	if err := e.Do(context.Background(), s, "A"); err != nil {
 		t.Fatal(err)
@@ -144,8 +144,8 @@ func TestDeterministicSetterOrderAndContextCancellation(t *testing.T) {
 	a, b := int64(1), int64(2)
 	e, _ := causal.Compile(causal.Schema(causal.Case("x", causal.Self("b"), causal.With("b+1"), causal.Self("a"), causal.With("a+1"), causal.Self("b"), causal.With("b+1"))))
 	s := causal.Scope(
-		causal.State("a", causal.Getter(func(context.Context) int64 { return a }), causal.Setter(func(_ context.Context, v int64) { order = append(order, "a"); a = v })),
-		causal.State("b", causal.Getter(func(context.Context) int64 { return b }), causal.Setter(func(_ context.Context, v int64) { order = append(order, "b"); b = v })),
+		causal.State("a", causal.Getter(func() int64 { return a }), causal.Setter(func(v int64) { order = append(order, "a"); a = v })),
+		causal.State("b", causal.Getter(func() int64 { return b }), causal.Setter(func(v int64) { order = append(order, "b"); b = v })),
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -168,7 +168,7 @@ func TestContinuationJSONAndVersionMismatch(t *testing.T) {
 	clock := causal.Clock(func() time.Time { return now })
 	v := int64(0)
 	e, _ := causal.Compile(causal.Schema(causal.Case("x", causal.Self("v"), causal.With("v+1"), causal.Wait(`duration("1s")`), causal.With("v+1"))))
-	binding := causal.State("v", causal.Getter(func(context.Context) int64 { return v }), causal.Setter(func(_ context.Context, x int64) { v = x }))
+	binding := causal.State("v", causal.Getter(func() int64 { return v }), causal.Setter(func(x int64) { v = x }))
 	s := causal.Scope(binding)
 	s.SetClock(clock)
 	if err := e.Do(context.Background(), s, "x"); err != nil {
@@ -203,7 +203,7 @@ func TestContinuationJSONAndVersionMismatch(t *testing.T) {
 func TestSelfTargetIsDependency(t *testing.T) {
 	v := int64(0)
 	e, _ := causal.Compile(causal.Schema(causal.Case("writer", causal.Self("v"), causal.With("1")), causal.Case("constant", causal.Self("v"), causal.With("2"))))
-	s := causal.Scope(causal.State("v", causal.Getter(func(context.Context) int64 { return v }), causal.Setter(func(_ context.Context, x int64) { v = x })))
+	s := causal.Scope(causal.State("v", causal.Getter(func() int64 { return v }), causal.Setter(func(x int64) { v = x })))
 	if err := e.Do(context.Background(), s, "writer"); err != nil {
 		t.Fatal(err)
 	}
@@ -229,8 +229,8 @@ func TestWaitInsideNestedCaseResumesInsideParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := causal.Scope(causal.State("value",
-		causal.Getter(func(context.Context) int64 { return value }),
-		causal.Setter(func(_ context.Context, v int64) { value = v }),
+		causal.Getter(func() int64 { return value }),
+		causal.Setter(func(v int64) { value = v }),
 	))
 	s.SetClock(func() time.Time { return now })
 	if err := e.Do(context.Background(), s, "root"); err != nil {
@@ -259,9 +259,9 @@ func TestReadinessGraphUpdatesOneEdgeAtATime(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := causal.Scope(
-		causal.State("x", causal.Getter(func(context.Context) int64 { return x }), causal.Setter(func(_ context.Context, v int64) { x = v })),
-		causal.State("y", causal.Getter(func(context.Context) int64 { return y }), causal.Setter(func(_ context.Context, v int64) { y = v })),
-		causal.State("z", causal.Getter(func(context.Context) int64 { return z }), causal.Setter(func(_ context.Context, v int64) { z = v })),
+		causal.State("x", causal.Getter(func() int64 { return x }), causal.Setter(func(v int64) { x = v })),
+		causal.State("y", causal.Getter(func() int64 { return y }), causal.Setter(func(v int64) { y = v })),
+		causal.State("z", causal.Getter(func() int64 { return z }), causal.Setter(func(v int64) { z = v })),
 	)
 	if err := e.Do(context.Background(), s, "A"); err != nil {
 		t.Fatal(err)
@@ -299,8 +299,8 @@ func TestNestedCaseDependenciesBelongToRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := causal.Scope(
-		causal.State("x", causal.Getter(func(context.Context) int64 { return x }), causal.Setter(func(_ context.Context, v int64) { x = v })),
-		causal.State("out", causal.Getter(func(context.Context) int64 { return out }), causal.Setter(func(_ context.Context, v int64) { out = v })),
+		causal.State("x", causal.Getter(func() int64 { return x }), causal.Setter(func(v int64) { x = v })),
+		causal.State("out", causal.Getter(func() int64 { return out }), causal.Setter(func(v int64) { out = v })),
 	)
 	if err := e.Do(context.Background(), s, "writer"); err != nil {
 		t.Fatal(err)

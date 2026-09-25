@@ -1,7 +1,6 @@
 package causal
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/google/cel-go/common/types/ref"
@@ -17,9 +16,9 @@ func (f bindingOptionFunc) apply(b *Binding) error { return f(b) }
 // Binding supplies the runtime implementation of one Symbol.
 type Binding struct {
 	name, kind string
-	get        func(context.Context) any
+	get        func() any
 	validate   func(ref.Val) error
-	set        func(context.Context, ref.Val)
+	set        func(ref.Val)
 	function   any
 	err        error
 }
@@ -39,18 +38,18 @@ func Bind(name string, implementations ...any) Binding {
 	}
 	return b
 }
-func Getter[T any](fn func(context.Context) T) bindingOption {
+func Getter[T any](fn func() T) bindingOption {
 	return bindingOptionFunc(func(b *Binding) error {
 		k := valueKind[T]()
 		if b.kind != "" && b.kind != k {
 			return fmt.Errorf("getter/setter value types differ")
 		}
 		b.kind = k
-		b.get = func(ctx context.Context) any { return fn(ctx) }
+		b.get = func() any { return fn() }
 		return nil
 	})
 }
-func Setter[T any](fn func(context.Context, T)) bindingOption {
+func Setter[T any](fn func(T)) bindingOption {
 	return bindingOptionFunc(func(b *Binding) error {
 		k := valueKind[T]()
 		if b.kind != "" && b.kind != k {
@@ -63,7 +62,7 @@ func Setter[T any](fn func(context.Context, T)) bindingOption {
 			}
 			return nil
 		}
-		b.set = func(ctx context.Context, v ref.Val) { fn(ctx, v.Value().(T)) }
+		b.set = func(v ref.Val) { fn(v.Value().(T)) }
 		return nil
 	})
 }

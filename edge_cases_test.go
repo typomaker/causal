@@ -14,13 +14,13 @@ import (
 
 func intState(name string, value *int64, gets, sets *int) Binding {
 	return State(name,
-		Getter(func(context.Context) int64 {
+		Getter(func() int64 {
 			if gets != nil {
 				*gets++
 			}
 			return *value
 		}),
-		Setter(func(_ context.Context, v int64) {
+		Setter(func(v int64) {
 			if sets != nil {
 				*sets++
 			}
@@ -107,8 +107,8 @@ func TestCommitPreflightsAllTypesBeforeFirstSetter(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := Scope(
-		State("a", Getter(func(context.Context) int64 { return a }), Setter(func(_ context.Context, v int64) { sets++; a = v })),
-		State("b", Getter(func(context.Context) int64 { return b }), Setter(func(_ context.Context, v int64) { sets++; b = v })),
+		State("a", Getter(func() int64 { return a }), Setter(func(v int64) { sets++; a = v })),
+		State("b", Getter(func() int64 { return b }), Setter(func(v int64) { sets++; b = v })),
 	)
 	if err := e.Do(context.Background(), s, "x"); err == nil {
 		t.Fatal("expected assignment error")
@@ -204,9 +204,9 @@ func TestScopesSerializeIndependently(t *testing.T) {
 		return v + 1, nil
 	})))
 	wrap := func(v *int64) *Runtime {
-		return Scope(State("v", Getter(func(context.Context) int64 {
+		return Scope(State("v", Getter(func() int64 {
 			return *v
-		}), Setter(func(_ context.Context, x int64) { *v = x })))
+		}), Setter(func(x int64) { *v = x })))
 	}
 	a, b := int64(0), int64(0)
 	sa, sb := wrap(&a), wrap(&b)

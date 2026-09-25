@@ -67,7 +67,7 @@ func BenchmarkDo(b *testing.B) {
 			)),
 			scope: func() *causal.Runtime {
 				return causal.Scope(causal.State("enabled",
-					causal.Getter(func(context.Context) bool { return true }),
+					causal.Getter(func() bool { return true }),
 				))
 			},
 		},
@@ -121,7 +121,7 @@ func BenchmarkDo(b *testing.B) {
 func benchmarkIntScope() *causal.Runtime {
 	var value int64
 	return causal.Scope(causal.State("value",
-		causal.Getter(func(context.Context) int64 { return value }),
-		causal.Setter(func(_ context.Context, next int64) { value = next }),
+		causal.Getter(func() int64 { return value }),
+		causal.Setter(func(next int64) { value = next }),
 	))
 }

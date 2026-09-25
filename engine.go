@@ -171,7 +171,7 @@ func (r *Runtime) eval(ctx context.Context, bound map[string]Binding, seg *segme
 			activation[dep] = v
 			continue
 		}
-		v := bound[dep].get(ctx)
+		v := bound[dep].get()
 		seg.snapshot[dep] = v
 		activation[dep] = v
 	}
@@ -220,7 +220,7 @@ func (r *Runtime) commit(ctx context.Context, s *Scope, bound map[string]Binding
 		}
 	}
 	for _, n := range seg.order {
-		bound[n].set(ctx, seg.pending[n].(ref.Val))
+		bound[n].set(seg.pending[n].(ref.Val))
 	}
 	for _, n := range seg.order {
 		for _, c := range r.dependents[n] {

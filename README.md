@@ -56,13 +56,13 @@ if err != nil {
 var scope causal.Scope
 err = runtime.Do(ctx, &scope, "deposit",
     causal.Bind("balance",
-        causal.Getter(func(context.Context) int64 { return account.Balance }),
-        causal.Setter(func(_ context.Context, value int64) {
+        causal.Getter(func() int64 { return account.Balance }),
+        causal.Setter(func(value int64) {
             account.Balance = value
         }),
     ),
     causal.Bind("amount",
-        causal.Getter(func(context.Context) int64 { return command.Amount }),
+        causal.Getter(func() int64 { return command.Amount }),
     ),
 )
 ```
@@ -230,8 +230,8 @@ part of the CEL signature stored in JSON:
 Getters and setters intentionally support only these forms:
 
 ```go
-func(context.Context) T
-func(context.Context, T)
+func() T
+func(T)
 ```
 
 ## Scope persistence

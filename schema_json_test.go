@@ -109,8 +109,8 @@ func TestSchemaJSONReferencesAndComposition(t *testing.T) {
 	}
 	ammo := int64(2)
 	scope := causal.Scope(causal.State("ammo",
-		causal.Getter(func(context.Context) int64 { return ammo }),
-		causal.Setter(func(_ context.Context, value int64) { ammo = value }),
+		causal.Getter(func() int64 { return ammo }),
+		causal.Setter(func(value int64) { ammo = value }),
 	))
 	if err := engine.Do(context.Background(), scope, "attack"); err != nil {
 		t.Fatal(err)
