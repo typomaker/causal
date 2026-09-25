@@ -4,65 +4,70 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/google/cel-go/common/types/ref"
 	"sync"
 	"time"
-
-	"github.com/google/cel-go/common/types/ref"
 )
 
-type stateOption interface{ apply(*stateDef) error }
-type BindingOption interface{ apply(*stateDef) error }
-type Binding interface{ stateBinding() }
-type stateOptionFunc func(*stateDef) error
+type bindingOption interface{ apply(*Binding) error }
+type bindingOptionFunc func(*Binding) error
 
-func (f stateOptionFunc) apply(s *stateDef) error { return f(s) }
+func (f bindingOptionFunc) apply(b *Binding) error { return f(b) }
 
-type stateDef struct {
+// Binding supplies the runtime implementation of one Symbol.
+type Binding struct {
 	name, kind string
 	get        func(context.Context) any
 	validate   func(ref.Val) error
-	set        func(context.Context, ref.Val) error
+	set        func(context.Context, ref.Val)
+	function   any
+	err        error
 }
 
-func (stateDef) stateBinding() {}
-
-// Getter binds func(context.Context) T using a statically typed adapter.
-func Getter[T any](fn func(context.Context) T) BindingOption {
-	return stateOptionFunc(func(s *stateDef) error {
-		k := staticKind[T]()
-		if s.kind != "" && s.kind != k {
+func Bind(name string, implementations ...any) Binding {
+	b := Binding{name: name}
+	for _, raw := range implementations {
+		if o, ok := raw.(bindingOption); ok {
+			if e := o.apply(&b); e != nil {
+				b.err = e
+			}
+		} else if b.function == nil {
+			b.function = raw
+		} else {
+			b.err = fmt.Errorf("multiple function implementations")
+		}
+	}
+	return b
+}
+func Getter[T any](fn func(context.Context) T) bindingOption {
+	return bindingOptionFunc(func(b *Binding) error {
+		k := valueKind[T]()
+		if b.kind != "" && b.kind != k {
 			return fmt.Errorf("getter/setter value types differ")
 		}
-		s.kind = k
-		s.get = func(ctx context.Context) any { return fn(ctx) }
+		b.kind = k
+		b.get = func(ctx context.Context) any { return fn(ctx) }
 		return nil
 	})
 }
-
-// Setter binds func(context.Context, T).
-func Setter[T any](fn func(context.Context, T)) BindingOption {
-	return stateOptionFunc(func(s *stateDef) error {
-		k := staticKind[T]()
-		if s.kind != "" && s.kind != k {
+func Setter[T any](fn func(context.Context, T)) bindingOption {
+	return bindingOptionFunc(func(b *Binding) error {
+		k := valueKind[T]()
+		if b.kind != "" && b.kind != k {
 			return fmt.Errorf("getter/setter value types differ")
 		}
-		s.kind = k
-		s.validate = func(v ref.Val) error {
+		b.kind = k
+		b.validate = func(v ref.Val) error {
 			if _, ok := v.Value().(T); !ok {
-				return fmt.Errorf("cannot assign CEL %s to %s State", v.Type(), k)
+				return fmt.Errorf("cannot assign CEL %s to %s Symbol", v.Type(), k)
 			}
 			return nil
 		}
-		s.set = func(ctx context.Context, v ref.Val) error {
-			x := v.Value().(T) // commit preflights every pending value first
-			fn(ctx, x)
-			return nil
-		}
+		b.set = func(ctx context.Context, v ref.Val) { fn(ctx, v.Value().(T)) }
 		return nil
 	})
 }
-
-func staticKind[T any]() string {
+func valueKind[T any]() string {
 	var z T
 	switch any(z).(type) {
 	case bool:
@@ -77,84 +82,43 @@ func staticKind[T any]() string {
 		return "double"
 	case time.Duration:
 		return "duration"
-	default:
-		return fmt.Sprintf("dynamic:%T", z)
 	}
-}
-
-// State defines a named runtime binding. Binding validation occurs in Engine.Do.
-func State(name string, opts ...BindingOption) Binding {
-	s := stateDef{name: name}
-	for _, opt := range opts {
-		if err := opt.apply(&s); err != nil && s.name != "" {
-			s.name = "\x00" + err.Error()
-		}
-	}
-	return s
+	return fmt.Sprintf("unsupported:%T", z)
 }
 
 type continuation struct {
 	RootCase    string    `json:"rootCase"`
 	PC          int       `json:"programCounter"`
 	AvailableAt time.Time `json:"availableAt"`
-	Version     string    `json:"engineVersion"`
+	Version     string    `json:"runtimeVersion"`
 }
-
-// Clock is the time source used by Wait.
 type Clock func() time.Time
 
-// Runtime owns bindings, readiness and suspended executions for one instance.
-type Runtime struct {
-	mu            sync.Mutex
-	states        map[string]stateDef
-	ready         map[string]bool
-	continuations map[string]continuation
-	err           error
-	clock         Clock
-	engineVersion string
+// Scope contains only mutable execution state. Its zero value is ready to use.
+type Scope struct {
+	mu             sync.Mutex
+	ready          map[string]bool
+	continuations  map[string]continuation
+	clock          Clock
+	runtimeVersion string
 }
 
-// Scope creates an isolated runtime environment.
-func Scope(bindings ...Binding) *Runtime {
-	s := &Runtime{states: map[string]stateDef{}, ready: map[string]bool{}, continuations: map[string]continuation{}, clock: Clock(time.Now)}
-	for _, binding := range bindings {
-		st, ok := binding.(stateDef)
-		if !ok {
-			s.err = fmt.Errorf("causal: unsupported Binding %T", binding)
-			continue
-		}
-		if len(st.name) > 0 && st.name[0] == 0 {
-			s.err = fmt.Errorf("causal: invalid State: %s", st.name[1:])
-			continue
-		}
-		if st.name == "" {
-			s.err = fmt.Errorf("causal: state name is empty")
-			continue
-		}
-		if _, ok := s.states[st.name]; ok {
-			s.err = fmt.Errorf("causal: duplicate state %q", st.name)
-			continue
-		}
-		if st.get == nil {
-			s.err = fmt.Errorf("causal: state %q has no Getter", st.name)
-			continue
-		}
-		s.states[st.name] = st
+func (s *Scope) init() {
+	if s.ready == nil {
+		s.ready = map[string]bool{}
 	}
-	return s
+	if s.continuations == nil {
+		s.continuations = map[string]continuation{}
+	}
+	if s.clock == nil {
+		s.clock = Clock(time.Now)
+	}
 }
-
-// Clock returns the Scope time source.
-func (s *Runtime) Clock() Clock {
+func (s *Scope) Clock() Clock { s.mu.Lock(); defer s.mu.Unlock(); s.init(); return s.clock }
+func (s *Scope) SetClock(c Clock) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.clock
-}
-
-// SetClock replaces the Scope time source. Nil restores time.Now.
-func (s *Runtime) SetClock(c Clock) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.init()
 	if c == nil {
 		s.clock = Clock(time.Now)
 	} else {
@@ -162,42 +126,28 @@ func (s *Runtime) SetClock(c Clock) {
 	}
 }
 
-func callGetter(ctx context.Context, st stateDef) any { return st.get(ctx) }
-
 type scopeJSON struct {
-	EngineVersion string                  `json:"engineVersion,omitempty"`
-	Readiness     map[string]bool         `json:"readiness,omitempty"`
-	Continuations map[string]continuation `json:"continuations,omitempty"`
+	RuntimeVersion string                  `json:"runtimeVersion,omitempty"`
+	Readiness      map[string]bool         `json:"readiness,omitempty"`
+	Continuations  map[string]continuation `json:"continuations,omitempty"`
 }
 
-func (s *Runtime) MarshalJSON() ([]byte, error) {
+func (s *Scope) MarshalJSON() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return json.Marshal(scopeJSON{s.engineVersion, s.ready, s.continuations})
+	s.init()
+	return json.Marshal(scopeJSON{s.runtimeVersion, s.ready, s.continuations})
 }
-
-// UnmarshalJSON restores runtime data while retaining State bindings already installed by Scope.
-func (s *Runtime) UnmarshalJSON(data []byte) error {
+func (s *Scope) UnmarshalJSON(data []byte) error {
 	var v scopeJSON
 	if err := json.Unmarshal(data, &v); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.states == nil {
-		s.states = map[string]stateDef{}
-	}
-	if s.clock == nil {
-		s.clock = Clock(time.Now)
-	}
-	s.engineVersion = v.EngineVersion
+	s.runtimeVersion = v.RuntimeVersion
 	s.ready = v.Readiness
-	if s.ready == nil {
-		s.ready = map[string]bool{}
-	}
 	s.continuations = v.Continuations
-	if s.continuations == nil {
-		s.continuations = map[string]continuation{}
-	}
+	s.init()
 	return nil
 }

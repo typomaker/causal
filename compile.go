@@ -1,17 +1,16 @@
 package causal
 
 import (
+	"causal/ast"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"sort"
-	"strings"
-
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
+	"sort"
+	"strings"
 )
 
 type instructionKind uint8
@@ -29,52 +28,49 @@ type instruction struct {
 	ast            *cel.Ast
 	jump           int
 }
+type bindingRequirement struct{ write, function bool }
 type compiledCase struct {
-	name string
-	code []instruction
-	deps map[string]struct{}
+	name         string
+	code         []instruction
+	deps         map[string]struct{}
+	requirements map[string]bindingRequirement
 }
 
-// Engine is an immutable compiled schema and is safe for concurrent use.
-type Engine struct {
+// Runtime is an immutable compiled program and is safe for concurrent use.
+type Runtime struct {
 	env        *cel.Env
 	cases      map[string]*compiledCase
-	funcs      map[string]*funcDef
+	contracts  map[string]symbolContract
 	dependents map[string][]string
 	version    string
 }
 
-func Compile(schema Program) (*Engine, error) {
-	funcs := map[string]*funcDef{}
-	caseDefs := map[string]*caseDef{}
-	var roots []*caseDef
-	for _, item := range schema.items {
-		switch x := item.(type) {
-		case *funcDef:
-			if err := validateFunc(x); err != nil {
-				return nil, err
-			}
-			if _, exists := funcs[x.name]; exists {
-				return nil, fmt.Errorf("causal: duplicate function %q", x.name)
-			}
-			funcs[x.name] = x
-		case *caseDef:
-			roots = append(roots, x)
-		default:
-			return nil, fmt.Errorf("causal: unsupported schema item %T", item)
+func compile(program Program) (*Runtime, error) {
+	contracts := map[string]symbolContract{}
+	for _, c := range program.contracts {
+		if c.err != nil {
+			return nil, c.err
 		}
+		if c.symbol.Name == "" {
+			return nil, fmt.Errorf("causal: symbol name is empty")
+		}
+		if _, ok := contracts[c.symbol.Name]; ok {
+			return nil, fmt.Errorf("causal: duplicate symbol %q", c.symbol.Name)
+		}
+		contracts[c.symbol.Name] = c
 	}
-	var collect func(*caseDef) error
-	collect = func(c *caseDef) error {
-		if c.name == "" {
+	defs := map[string]ast.Case{}
+	var collect func(ast.Case) error
+	collect = func(c ast.Case) error {
+		if c.Name == "" {
 			return fmt.Errorf("causal: case name is empty")
 		}
-		if old, ok := caseDefs[c.name]; ok && old != c {
-			return fmt.Errorf("causal: duplicate case %q", c.name)
+		if _, ok := defs[c.Name]; ok {
+			return fmt.Errorf("causal: duplicate case %q", c.Name)
 		}
-		caseDefs[c.name] = c
-		for _, op := range c.ops {
-			if child, ok := op.(*caseDef); ok {
+		defs[c.Name] = c
+		for _, s := range c.Statements {
+			if child, ok := s.(ast.Case); ok {
 				if err := collect(child); err != nil {
 					return err
 				}
@@ -82,193 +78,127 @@ func Compile(schema Program) (*Engine, error) {
 		}
 		return nil
 	}
-	// Resolve named structural references only after all composed declarations
-	// have been collected. This permits references across JSON documents.
-	var resolve func(*caseDef, []string) error
-	resolve = func(c *caseDef, path []string) error {
-		for i, raw := range c.ops {
-			ref, ok := raw.(caseRefOp)
-			if !ok {
-				continue
-			}
-			target, exists := caseDefs[ref.name]
-			if !exists {
-				return fmt.Errorf("causal: case %q: unknown case %q", c.name, ref.name)
-			}
-			cycleAt := -1
-			for j, name := range path {
-				if name == ref.name {
-					cycleAt = j
-					break
-				}
-			}
-			if cycleAt >= 0 {
-				cycle := append(append([]string{}, path[cycleAt:]...), ref.name)
-				return fmt.Errorf("causal: recursive case reference: %s", strings.Join(cycle, " -> "))
-			}
-			if err := resolve(target, append(path, ref.name)); err != nil {
-				return err
-			}
-			c.ops[i] = resolvedCaseRef{target}
-		}
-		return nil
-	}
-	for _, c := range roots {
+	for _, c := range program.AST.Cases {
 		if err := collect(c); err != nil {
 			return nil, err
 		}
 	}
-	sort.SliceStable(roots, func(i, j int) bool { return roots[i].name < roots[j].name })
-	for _, c := range roots {
-		if err := resolve(c, []string{c.name}); err != nil {
-			return nil, err
-		}
+	if len(program.AST.Cases) == 0 {
+		return nil, fmt.Errorf("causal: program has no cases")
 	}
-	if len(caseDefs) == 0 {
-		return nil, fmt.Errorf("causal: schema has no cases")
-	}
-
-	// Parse first with a permissive environment to discover state identifiers.
-	parseEnv, _ := cel.NewEnv()
-	identifiers := map[string]struct{}{}
-	var sources []string
-	var gatherSources func(*caseDef)
-	gatherSources = func(c *caseDef) {
-		for _, op := range c.ops {
-			switch x := op.(type) {
-			case withOp:
-				sources = append(sources, x.expr)
-			case skipOp:
-				sources = append(sources, x.expr)
-			case waitOp:
-				sources = append(sources, x.expr)
-			case *caseDef:
-				gatherSources(x)
-			case resolvedCaseRef:
-				gatherSources(x.def)
+	opts := []cel.EnvOption{cel.CrossTypeNumericComparisons(true), maxFunction()}
+	for _, name := range sortedContracts(contracts) {
+		c := contracts[name]
+		if c.function {
+			args := make([]*cel.Type, len(c.args))
+			for i, k := range c.args {
+				args[i] = celType(k)
 			}
+			opts = append(opts, cel.Function(name, cel.Overload(overloadID(name), args, celType(c.result))))
+		} else {
+			opts = append(opts, cel.Variable(name, celType(c.kind)))
 		}
-	}
-	for _, c := range roots {
-		gatherSources(c)
-	}
-	for _, src := range sources {
-		ast, iss := parseEnv.Parse(src)
-		if iss.Err() != nil {
-			return nil, fmt.Errorf("causal: parse %q: %w", src, iss.Err())
-		}
-		collectIdentifiers(ast.Expr(), nil, identifiers)
-	}
-	for name := range funcs {
-		delete(identifiers, name)
-	}
-	opts := []cel.EnvOption{}
-	ids := make([]string, 0, len(identifiers))
-	for id := range identifiers {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		opts = append(opts, cel.Variable(id, cel.DynType))
-	}
-	for _, f := range funcs {
-		opts = append(opts, cel.Function(f.name, cel.Overload(overloadID(f.name), f.args, f.result)))
 	}
 	env, err := cel.NewEnv(opts...)
 	if err != nil {
 		return nil, err
 	}
-	e := &Engine{env: env, cases: map[string]*compiledCase{}, funcs: funcs, dependents: map[string][]string{}, version: schemaVersion(schema)}
-	for _, def := range roots {
-		name := def.name
-		cc := &compiledCase{name: name, deps: map[string]struct{}{}}
-		if _, err := compileOps(env, def, &cc.code, cc.deps, ""); err != nil {
-			return nil, fmt.Errorf("causal: case %q: %w", name, err)
+	r := &Runtime{env: env, cases: map[string]*compiledCase{}, contracts: contracts, dependents: map[string][]string{}, version: programVersion(program)}
+	for _, def := range program.AST.Cases {
+		cc := &compiledCase{name: def.Name, deps: map[string]struct{}{}, requirements: map[string]bindingRequirement{}}
+		if _, err := compileStatements(env, def, defs, &cc.code, cc.deps, cc.requirements, "", []string{def.Name}); err != nil {
+			return nil, fmt.Errorf("causal: case %q: %w", def.Name, err)
 		}
-		e.cases[name] = cc
 		for dep := range cc.deps {
-			e.dependents[dep] = append(e.dependents[dep], name)
+			c, ok := contracts[dep]
+			if !ok || c.function {
+				return nil, fmt.Errorf("causal: case %q: undeclared value symbol %q", def.Name, dep)
+			}
+			q := cc.requirements[dep]
+			cc.requirements[dep] = q
+			r.dependents[dep] = append(r.dependents[dep], def.Name)
 		}
+		for name, c := range contracts {
+			if c.function && usesFunction(cc.code, name) {
+				cc.requirements[name] = bindingRequirement{function: true}
+			}
+		}
+		r.cases[def.Name] = cc
 	}
-	return e, nil
+	return r, nil
 }
 
-func compileOps(env *cel.Env, c *caseDef, code *[]instruction, deps map[string]struct{}, self string) (string, error) {
-	for _, raw := range c.ops {
-		switch op := raw.(type) {
-		case selfOp:
-			if op.name == "" {
+func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code *[]instruction, deps map[string]struct{}, req map[string]bindingRequirement, self string, path []string) (string, error) {
+	start := len(*code)
+	for _, raw := range c.Statements {
+		switch s := raw.(type) {
+		case ast.Self:
+			if s.Symbol == "" {
 				return self, fmt.Errorf("Self name is empty")
 			}
-			self = op.name
-		case withOp:
+			self = s.Symbol
+		case ast.With:
 			if self == "" {
-				return self, fmt.Errorf("With %q has no preceding Self", op.expr)
+				return self, fmt.Errorf("With %q has no preceding Self", s.Expression)
 			}
-			ast, err := compileExpr(env, op.expr)
-			if err != nil {
-				return self, err
+			a, e := compileExpr(env, s.Expression)
+			if e != nil {
+				return self, e
 			}
-			addDeps(ast, deps)
+			addDeps(a, deps)
 			deps[self] = struct{}{}
-			*code = append(*code, instruction{kind: instWith, target: self, source: op.expr, ast: ast})
-		case skipOp:
-			ast, err := compileExpr(env, op.expr)
-			if err != nil {
-				return self, err
+			q := req[self]
+			q.write = true
+			req[self] = q
+			*code = append(*code, instruction{kind: instWith, target: self, source: s.Expression, ast: a})
+		case ast.Skip:
+			a, e := compileExpr(env, s.Expression)
+			if e != nil {
+				return self, e
 			}
-			if ast.OutputType() != cel.BoolType && ast.OutputType() != cel.DynType {
-				return self, fmt.Errorf("Skip %q must return bool, got %v", op.expr, ast.OutputType())
+			if a.OutputType() != cel.BoolType {
+				return self, fmt.Errorf("Skip %q must return bool, got %v", s.Expression, a.OutputType())
 			}
-			addDeps(ast, deps)
-			at := len(*code)
-			*code = append(*code, instruction{kind: instSkip, source: op.expr, ast: ast})
-			(*code)[at].jump = -1
-		case waitOp:
-			ast, err := compileExpr(env, op.expr)
-			if err != nil {
-				return self, err
+			addDeps(a, deps)
+			*code = append(*code, instruction{kind: instSkip, source: s.Expression, ast: a, jump: -1})
+		case ast.Wait:
+			a, e := compileExpr(env, s.Expression)
+			if e != nil {
+				return self, e
 			}
-			if ast.OutputType() != cel.DurationType && ast.OutputType() != cel.DynType {
-				return self, fmt.Errorf("Wait %q must return duration, got %v", op.expr, ast.OutputType())
+			if a.OutputType() != cel.DurationType {
+				return self, fmt.Errorf("Wait %q must return duration, got %v", s.Expression, a.OutputType())
 			}
-			addDeps(ast, deps)
-			*code = append(*code, instruction{kind: instWait, source: op.expr, ast: ast})
-		case *caseDef:
-			start := len(*code)
-			var err error
-			self, err = compileOps(env, op, code, deps, self)
-			if err != nil {
-				return self, err
+			addDeps(a, deps)
+			*code = append(*code, instruction{kind: instWait, source: s.Expression, ast: a})
+		case ast.Case:
+			var e error
+			self, e = compileStatements(env, s, defs, code, deps, req, self, append(path, s.Name))
+			if e != nil {
+				return self, e
 			}
-			end := len(*code)
-			*code = append(*code, instruction{kind: instEndCase})
-			for i := start; i < end; i++ {
-				if (*code)[i].kind == instSkip && (*code)[i].jump == -1 {
-					(*code)[i].jump = end
+		case ast.CaseRef:
+			target, ok := defs[s.Name]
+			if !ok {
+				return self, fmt.Errorf("unknown case %q", s.Name)
+			}
+			for _, n := range path {
+				if n == s.Name {
+					return self, fmt.Errorf("recursive case reference: %s", strings.Join(append(path, s.Name), " -> "))
 				}
 			}
-		case resolvedCaseRef:
-			start := len(*code)
-			var err error
-			self, err = compileOps(env, op.def, code, deps, self)
-			if err != nil {
-				return self, err
-			}
-			end := len(*code)
-			*code = append(*code, instruction{kind: instEndCase})
-			for i := start; i < end; i++ {
-				if (*code)[i].kind == instSkip && (*code)[i].jump == -1 {
-					(*code)[i].jump = end
-				}
+			var e error
+			self, e = compileStatements(env, target, defs, code, deps, req, self, append(path, s.Name))
+			if e != nil {
+				return self, e
 			}
 		default:
-			return self, fmt.Errorf("unsupported operation %T", raw)
+			return self, fmt.Errorf("unsupported statement %T", raw)
 		}
 	}
 	end := len(*code)
 	*code = append(*code, instruction{kind: instEndCase})
-	for i := 0; i < end; i++ {
+	for i := start; i < end; i++ {
 		if (*code)[i].kind == instSkip && (*code)[i].jump == -1 {
 			(*code)[i].jump = end
 		}
@@ -276,66 +206,42 @@ func compileOps(env *cel.Env, c *caseDef, code *[]instruction, deps map[string]s
 	return self, nil
 }
 
-// MarshalJSON emits non-executable Engine metadata only.
-func (e *Engine) MarshalJSON() ([]byte, error) {
-	names := make([]string, 0, len(e.cases))
-	for name := range e.cases {
-		names = append(names, name)
+func sortedContracts(m map[string]symbolContract) []string {
+	r := make([]string, 0, len(m))
+	for n := range m {
+		r = append(r, n)
 	}
-	sort.Strings(names)
-	return json.Marshal(struct {
-		Version string   `json:"version"`
-		Cases   []string `json:"cases"`
-	}{e.version, names})
+	sort.Strings(r)
+	return r
 }
-
-func schemaVersion(s Program) string {
-	h := sha256.New()
-	var walk func(*caseDef)
-	walk = func(c *caseDef) {
-		fmt.Fprintf(h, "case:%s{", c.name)
-		for _, raw := range c.ops {
-			switch x := raw.(type) {
-			case selfOp:
-				fmt.Fprintf(h, "self:%s;", x.name)
-			case withOp:
-				fmt.Fprintf(h, "with:%s;", x.expr)
-			case skipOp:
-				fmt.Fprintf(h, "skip:%s;", x.expr)
-			case waitOp:
-				fmt.Fprintf(h, "wait:%s;", x.expr)
-			case *caseDef:
-				walk(x)
-			case caseRefOp:
-				fmt.Fprintf(h, "case-ref:%s;", x.name)
-			case resolvedCaseRef:
-				fmt.Fprintf(h, "case-ref:%s;", x.def.name)
-			}
-		}
-		fmt.Fprint(h, "}")
+func celType(k string) *cel.Type {
+	switch k {
+	case "bool":
+		return cel.BoolType
+	case "string":
+		return cel.StringType
+	case "int":
+		return cel.IntType
+	case "uint":
+		return cel.UintType
+	case "double":
+		return cel.DoubleType
+	case "duration":
+		return cel.DurationType
 	}
-	for _, item := range s.items {
-		switch x := item.(type) {
-		case *funcDef:
-			fmt.Fprintf(h, "func:%s:%s;", x.name, x.signature)
-		case *caseDef:
-			walk(x)
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil))
+	return cel.DynType
 }
-
 func compileExpr(env *cel.Env, src string) (*cel.Ast, error) {
 	if strings.TrimSpace(src) == "" {
 		return nil, fmt.Errorf("empty CEL expression")
 	}
-	ast, iss := env.Compile(src)
+	a, iss := env.Compile(src)
 	if iss.Err() != nil {
 		return nil, fmt.Errorf("compile %q: %w", src, iss.Err())
 	}
-	return ast, nil
+	return a, nil
 }
-func addDeps(ast *cel.Ast, out map[string]struct{}) { collectIdentifiers(ast.Expr(), nil, out) }
+func addDeps(a *cel.Ast, out map[string]struct{}) { collectIdentifiers(a.Expr(), nil, out) }
 func collectIdentifiers(e *exprpb.Expr, locals map[string]bool, out map[string]struct{}) {
 	if e == nil {
 		return
@@ -357,8 +263,8 @@ func collectIdentifiers(e *exprpb.Expr, locals map[string]bool, out map[string]s
 			collectIdentifiers(a, locals, out)
 		}
 	case *exprpb.Expr_StructExpr:
-		for _, ent := range x.StructExpr.Entries {
-			collectIdentifiers(ent.Value, locals, out)
+		for _, a := range x.StructExpr.Entries {
+			collectIdentifiers(a.Value, locals, out)
 		}
 	case *exprpb.Expr_ComprehensionExpr:
 		collectIdentifiers(x.ComprehensionExpr.IterRange, locals, out)
@@ -374,5 +280,61 @@ func collectIdentifiers(e *exprpb.Expr, locals map[string]bool, out map[string]s
 		collectIdentifiers(x.ComprehensionExpr.Result, n, out)
 	}
 }
+func usesFunction(code []instruction, name string) bool {
+	for _, i := range code {
+		if i.ast != nil {
+			ids := map[string]struct{}{}
+			addDeps(i.ast, ids)
+			if _, ok := ids[name]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+func programVersion(p Program) string {
+	b, _ := p.MarshalJSON()
+	h := sha256.New()
+	h.Write(b)
+	names := make([]string, 0, len(p.contracts))
+	m := map[string]symbolContract{}
+	for _, c := range p.contracts {
+		names = append(names, c.symbol.Name)
+		m[c.symbol.Name] = c
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		c := m[n]
+		fmt.Fprintf(h, "%s:%s:%v;", n, c.kind, c.args)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 func overloadID(name string) string { return "causal_" + name }
-func celError(err error) ref.Val    { return types.NewErr("%s", err) }
+
+func maxFunction() cel.EnvOption {
+	max := func(a, b ref.Val) ref.Val {
+		av, aok := numeric(a)
+		bv, bok := numeric(b)
+		if !aok || !bok {
+			return types.NewErr("max arguments must be numeric")
+		}
+		if av > bv {
+			return types.Double(av)
+		}
+		return types.Double(bv)
+	}
+	return cel.Function("max",
+		cel.Overload("causal_max_double_double", []*cel.Type{cel.DoubleType, cel.DoubleType}, cel.DoubleType, cel.BinaryBinding(max)),
+		cel.Overload("causal_max_int_double", []*cel.Type{cel.IntType, cel.DoubleType}, cel.DoubleType, cel.BinaryBinding(max)),
+		cel.Overload("causal_max_double_int", []*cel.Type{cel.DoubleType, cel.IntType}, cel.DoubleType, cel.BinaryBinding(max)),
+	)
+}
+func numeric(v ref.Val) (float64, bool) {
+	switch x := v.Value().(type) {
+	case float64:
+		return x, true
+	case int64:
+		return float64(x), true
+	}
+	return 0, false
+}

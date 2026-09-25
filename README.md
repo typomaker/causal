@@ -1,102 +1,102 @@
 # causal
 
-`causal` is a Go library for declarative, CEL-powered state transitions. A schema is compiled once into an immutable `Engine`; each `Runtime` binds CEL names to application memory and stores readiness and suspended execution state.
+`causal` is a Go library for declarative, CEL-powered state transitions. A
+`Program` is compiled once into an immutable `Runtime`; a zero-value `Scope`
+stores only mutable execution state. Application values and functions are
+provided as bindings on every `Do` call.
 
 ```go
-engine, err := causal.Compile(causal.Schema(
-    causal.Case("hit",
-        causal.Skip("!alive"),
+program := causal.New(
+    causal.Symbol[float64]("health"),
+    causal.Symbol[float64]("damage"),
+    causal.Case("attack",
+        causal.Skip("damage <= 0"),
         causal.Self("health"),
         causal.With("max(0, health - damage)"),
+        causal.Wait(`duration("3s")`),
     ),
-))
-
-scope := causal.Scope(
-    causal.State("health",
-        causal.Getter(func(context.Context) int64 { return player.Health }),
-        causal.Setter(func(_ context.Context, value int64) { player.Health = value }),
-    ),
-    causal.State("damage", causal.Getter(func(context.Context) int64 { return 10 })),
-    causal.State("alive", causal.Getter(func(context.Context) bool { return player.Alive })),
 )
 
-err = engine.Do(ctx, scope, "hit")
+runtime, err := program.Compile()
+if err != nil {
+    return err
+}
+
+var scope causal.Scope
+err = runtime.Do(ctx, &scope, "attack",
+    causal.Bind("health",
+        causal.Getter(func(context.Context) float64 { return player.Health }),
+        causal.Setter(func(_ context.Context, value float64) { player.Health = value }),
+    ),
+    causal.Bind("damage",
+        causal.Getter(func(context.Context) float64 { return hit.Damage }),
+    ),
+)
 ```
 
-Within a segment, reads are lazy and see staged writes. Writes are applied only at `Wait` or case completion. `Wait` stores a continuation; calling `Do` before its deadline is a no-op, and calling it afterward resumes at the next instruction. Dependency propagation only marks cases ready; it never runs them.
+Function symbols declare their complete compile-time signature. The runtime
+implementation is supplied separately:
 
-`Getter` and `Setter` are statically typed, non-error-returning in-memory accessors. State value types are checked when CEL results are assigned. `Runtime.SetClock` can supply a deterministic clock function for simulations and tests.
+```go
+causal.Symbol[
+    func(context.Context, float64, float64) (float64, error)
+]("calculate_damage")
 
-## Declarative JSON
+causal.Bind("calculate_damage", calculateDamage)
+```
 
-`Program` works directly with `encoding/json`. A document maps case names to
-ordered operator arrays:
+Function signatures may omit `context.Context`, `error`, or both. Neither is
+part of the CEL signature. Getters and setters intentionally have only these
+forms:
+
+```go
+func(context.Context) T
+func(context.Context, T)
+```
+
+`Do` validates the binding contract for the complete selected root case before
+executing anything. This remains true when execution resumes after `Wait`.
+Within a segment, reads are lazy and see staged writes. Writes commit at `Wait`
+or root-case completion. Dependency propagation marks root cases ready but
+never executes them.
+
+## Declarative JSON and AST
+
+Package `causal/ast` exposes the canonical declaration types: `Program`,
+`Symbol`, `Case`, `Stmt`, `Self`, `With`, `Skip`, and `Wait`. Both `ast.Program`
+and the ergonomic `causal.Program` wrapper work with `encoding/json`.
 
 ```json
 {
-  "combat.attack": [
-    { "skip": "!alive" },
-    { "case": "combat.execute" }
-  ],
-  "combat.execute": [
+  "attack": [
     { "self": "health" },
     { "with": "health - damage" }
   ]
 }
 ```
 
-```go
-var combat causal.Program
-err := json.Unmarshal(data, &combat)
+JSON contains cases and statements only. Symbol contracts, compiled CEL,
+bindings, functions, continuations, and other runtime metadata are deliberately
+excluded. Symbol declarations therefore need to be composed in Go before a
+decoded case document is compiled.
 
-schema := causal.Schema(
-    combat,
-    causal.Func("damage", damage),
-)
-engine, err := causal.Compile(schema)
-```
+## Scope persistence
 
-Documents can be decoded independently and combined with `Schema`; named case
-references are resolved only after composition. JSON contains declarations
-only: functions, State bindings, compiled CEL, continuations, and other runtime
-metadata are excluded. Loading files or database records remains the
-application's responsibility.
-
-## Runtime persistence
-
-`Engine` JSON contains metadata only. A scope serializes only its engine version, readiness, and continuations:
+`Scope` serializes only its runtime version, readiness, and continuations:
 
 ```go
-data, err := json.Marshal(scope)
-restored := causal.Scope(
-    causal.State("health", causal.Getter(getHealth), causal.Setter(setHealth)),
-)
-err = json.Unmarshal(data, restored)
+data, err := json.Marshal(&scope)
+
+var restored causal.Scope
+err = json.Unmarshal(data, &restored)
 ```
 
-Restored continuations are rejected if their engine version differs. Application state itself remains the application's persistence responsibility.
+Bindings are always passed again to `Runtime.Do`. A restored continuation is
+rejected when it belongs to a different compiled runtime.
 
-Because the specified API declares State bindings only in `Scope`, `Compile(schema)` cannot know their Go types or whether they have setters. CEL syntax, known functions, `Skip`/`Wait` types, and structural errors are checked at compile time; missing bindings, read-only targets, and dynamic State conversion are validated by `Do` before commit.
-
-Writing the same value is deliberately treated as a change: its setter runs and
-dependent root cases become ready. Equality is not consulted, so this policy is
-independent of the State's Go type.
-
-Getters, setters, and successful `Func` implementations are application
-callbacks and must not panic. A panic is not converted into a causal error and
-propagates to the caller. They must also obey the callback contract: getters and
-setters are in-memory accessors, while a `Func` must not perform side effects
-that would need rollback. Causal rollback covers staged State writes; it cannot
-undo effects performed inside callbacks.
-
-## Benchmarks
-
-Run the compilation and execution benchmarks with allocation statistics:
+## Tests and benchmarks
 
 ```sh
-go test -run '^$' -bench . -benchmem
+go test ./...
+go test ./... -coverprofile=coverage.out
 ```
-
-Use `-count` and `benchstat` when comparing two revisions to reduce measurement
-noise. For example, save each revision with `-count 10` and compare the output
-files with `benchstat before.txt after.txt`.

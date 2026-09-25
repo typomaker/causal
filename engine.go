@@ -3,7 +3,6 @@ package causal
 import (
 	"context"
 	"fmt"
-
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
@@ -15,35 +14,33 @@ type segment struct {
 	order             []string
 }
 
-// Do executes one explicitly named Case until END or the next Wait.
-func (e *Engine) Do(ctx context.Context, scope *Runtime, name string) error {
+// Do validates all bindings required by the complete root Case, then executes
+// until completion or the next Wait.
+func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ...Binding) error {
 	if scope == nil {
 		return fmt.Errorf("causal: nil scope")
 	}
-	cc, ok := e.cases[name]
+	cc, ok := r.cases[name]
 	if !ok {
 		return fmt.Errorf("causal: unknown case %q", name)
 	}
+	bound, err := r.validateBindings(cc, bindings)
+	if err != nil {
+		return fmt.Errorf("causal: case %q: %w", name, err)
+	}
 	scope.mu.Lock()
 	defer scope.mu.Unlock()
+	scope.init()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if scope.err != nil {
-		return scope.err
+	if scope.runtimeVersion != "" && scope.runtimeVersion != r.version {
+		return fmt.Errorf("causal: scope runtime version %q is incompatible with %q", scope.runtimeVersion, r.version)
 	}
-	if scope.engineVersion != "" && scope.engineVersion != e.version {
-		return fmt.Errorf("causal: scope engine version %q is incompatible with %q", scope.engineVersion, e.version)
-	}
-	if scope.engineVersion == "" {
-		scope.engineVersion = e.version
-	}
+	scope.runtimeVersion = r.version
 	pc := 0
 	if c, ok := scope.continuations[name]; ok {
-		if c.Version != e.version {
-			return fmt.Errorf("causal: continuation for %q has incompatible engine version %q", name, c.Version)
-		}
-		if c.RootCase != name || c.PC < 0 || c.PC >= len(cc.code) {
+		if c.Version != r.version || c.RootCase != name || c.PC < 0 || c.PC >= len(cc.code) {
 			return fmt.Errorf("causal: invalid continuation for %q", name)
 		}
 		if scope.clock().Before(c.AvailableAt) {
@@ -60,25 +57,20 @@ func (e *Engine) Do(ctx context.Context, scope *Runtime, name string) error {
 		ins := cc.code[pc]
 		switch ins.kind {
 		case instWith:
-			st, ok := scope.states[ins.target]
-			if !ok {
-				return fmt.Errorf("causal: case %q: unknown target state %q", name, ins.target)
+			b := bound[ins.target]
+			v, e := r.eval(ctx, bound, seg, ins)
+			if e != nil {
+				return fmt.Errorf("causal: case %q With %q: %w", name, ins.source, e)
 			}
-			if st.set == nil {
-				return fmt.Errorf("causal: case %q: state %q is read-only", name, ins.target)
-			}
-			v, err := e.eval(ctx, scope, seg, ins)
-			if err != nil {
-				return fmt.Errorf("causal: case %q With %q: %w", name, ins.source, err)
-			}
-			if _, exists := seg.pending[ins.target]; !exists {
+			if _, ok := seg.pending[ins.target]; !ok {
 				seg.order = append(seg.order, ins.target)
 			}
 			seg.pending[ins.target] = v
+			_ = b
 		case instSkip:
-			v, err := e.eval(ctx, scope, seg, ins)
-			if err != nil {
-				return fmt.Errorf("causal: case %q Skip %q: %w", name, ins.source, err)
+			v, e := r.eval(ctx, bound, seg, ins)
+			if e != nil {
+				return fmt.Errorf("causal: case %q Skip %q: %w", name, ins.source, e)
 			}
 			b, ok := v.(types.Bool)
 			if !ok {
@@ -89,9 +81,9 @@ func (e *Engine) Do(ctx context.Context, scope *Runtime, name string) error {
 				continue
 			}
 		case instWait:
-			v, err := e.eval(ctx, scope, seg, ins)
-			if err != nil {
-				return fmt.Errorf("causal: case %q Wait %q: %w", name, ins.source, err)
+			v, e := r.eval(ctx, bound, seg, ins)
+			if e != nil {
+				return fmt.Errorf("causal: case %q Wait %q: %w", name, ins.source, e)
 			}
 			d, ok := v.(types.Duration)
 			if !ok {
@@ -100,28 +92,75 @@ func (e *Engine) Do(ctx context.Context, scope *Runtime, name string) error {
 			if d.Duration < 0 {
 				return fmt.Errorf("causal: Wait %q returned negative duration", ins.source)
 			}
-			if err := e.commit(ctx, scope, seg); err != nil {
-				return err
+			if e := r.commit(ctx, scope, bound, seg); e != nil {
+				return e
 			}
-			scope.continuations[name] = continuation{RootCase: name, PC: pc + 1, AvailableAt: scope.clock().Add(d.Duration), Version: e.version}
+			scope.continuations[name] = continuation{RootCase: name, PC: pc + 1, AvailableAt: scope.clock().Add(d.Duration), Version: r.version}
 			return nil
-		case instEndCase:
 		}
 		pc++
 	}
-	if err := e.commit(ctx, scope, seg); err != nil {
+	if err := r.commit(ctx, scope, bound, seg); err != nil {
 		return err
 	}
 	delete(scope.continuations, name)
 	return nil
 }
 
-func (e *Engine) eval(ctx context.Context, s *Runtime, seg *segment, ins instruction) (ref.Val, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[string]Binding, error) {
+	m := map[string]Binding{}
+	for _, b := range items {
+		if b.err != nil {
+			return nil, fmt.Errorf("invalid binding %q: %w", b.name, b.err)
+		}
+		if b.name == "" {
+			return nil, fmt.Errorf("binding name is empty")
+		}
+		if _, ok := m[b.name]; ok {
+			return nil, fmt.Errorf("duplicate binding %q", b.name)
+		}
+		c, ok := r.contracts[b.name]
+		if !ok {
+			return nil, fmt.Errorf("binding for undeclared symbol %q", b.name)
+		}
+		if c.function {
+			if b.function == nil {
+				return nil, fmt.Errorf("function symbol %q has no implementation", b.name)
+			}
+			if _, err := functionAdapter(c, b.function); err != nil {
+				return nil, err
+			}
+		} else {
+			if b.get == nil {
+				return nil, fmt.Errorf("symbol %q has no Getter", b.name)
+			}
+			if b.kind != c.kind {
+				return nil, fmt.Errorf("symbol %q binding type %s does not match %s", b.name, b.kind, c.kind)
+			}
+		}
+		m[b.name] = b
 	}
+	for n, q := range cc.requirements {
+		b, ok := m[n]
+		if !ok {
+			return nil, fmt.Errorf("missing binding for symbol %q", n)
+		}
+		if q.write && b.set == nil {
+			return nil, fmt.Errorf("symbol %q is read-only", n)
+		}
+	}
+	return m, nil
+}
+
+func (r *Runtime) eval(ctx context.Context, bound map[string]Binding, seg *segment, ins instruction) (ref.Val, error) {
 	activation := map[string]any{}
-	for dep := range e.casesForAST(ins.ast) {
+	ids := map[string]struct{}{}
+	addDeps(ins.ast, ids)
+	for dep := range ids {
+		c, ok := r.contracts[dep]
+		if !ok || c.function {
+			continue
+		}
 		if v, ok := seg.pending[dep]; ok {
 			activation[dep] = v
 			continue
@@ -130,82 +169,50 @@ func (e *Engine) eval(ctx context.Context, s *Runtime, seg *segment, ins instruc
 			activation[dep] = v
 			continue
 		}
-		st, ok := s.states[dep]
-		if !ok {
-			return nil, fmt.Errorf("unknown state %q", dep)
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		v := callGetter(ctx, st)
+		v := bound[dep].get(ctx)
 		seg.snapshot[dep] = v
 		activation[dep] = v
 	}
-	opts := []cel.ProgramOption{}
-	if len(e.funcs) > 0 {
-		ovs := make([]*functions.Overload, 0, len(e.funcs))
-		for _, f := range e.funcs {
-			fn := f
-			ovs = append(ovs, &functions.Overload{Operator: overloadID(fn.name), Function: func(args ...ref.Val) ref.Val { return invokeFunc(ctx, fn, args) }})
+	ovs := []*functions.Overload{}
+	for n, c := range r.contracts {
+		if !c.function {
+			continue
 		}
-		opts = append(opts, cel.Functions(ovs...))
+		b, ok := bound[n]
+		if !ok {
+			continue
+		}
+		call, _ := functionAdapter(c, b.function)
+		ovs = append(ovs, &functions.Overload{Operator: overloadID(n), Function: func(args ...ref.Val) ref.Val { return call(ctx, args) }})
 	}
-	p, err := e.env.Program(ins.ast, opts...)
-	if err != nil {
-		return nil, err
+	p, e := r.env.Program(ins.ast, cel.Functions(ovs...))
+	if e != nil {
+		return nil, e
 	}
-	v, _, err := p.Eval(activation)
-	if err != nil {
-		return nil, err
+	v, _, e := p.Eval(activation)
+	if e != nil {
+		return nil, e
 	}
 	if types.IsError(v) {
 		return nil, fmt.Errorf("%v", v)
 	}
 	return v, nil
 }
-func (e *Engine) casesForAST(ast *cel.Ast) map[string]struct{} {
-	m := map[string]struct{}{}
-	addDeps(ast, m)
-	for n := range e.funcs {
-		delete(m, n)
-	}
-	return m
-}
-func invokeFunc(ctx context.Context, f *funcDef, args []ref.Val) ref.Val {
-	if err := ctx.Err(); err != nil {
-		return celError(err)
-	}
-	return f.invoke(ctx, args)
-}
-func (e *Engine) commit(ctx context.Context, s *Runtime, seg *segment) error {
+func (r *Runtime) commit(ctx context.Context, s *Scope, bound map[string]Binding, seg *segment) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if len(seg.pending) == 0 {
-		return nil
-	}
-	changed := append([]string(nil), seg.order...)
-	// Validate the complete write set before invoking any application setter.
-	// This preserves segment atomicity for conversion errors even when the bad
-	// value is not the first state in setter order.
-	for _, name := range changed {
-		v := seg.pending[name].(ref.Val)
-		st := s.states[name]
-		if st.validate != nil {
-			if err := st.validate(v); err != nil {
-				return fmt.Errorf("causal: state %q: %w", name, err)
-			}
+	for _, n := range seg.order {
+		v := seg.pending[n].(ref.Val)
+		if err := bound[n].validate(v); err != nil {
+			return fmt.Errorf("causal: symbol %q: %w", n, err)
 		}
 	}
-	for _, name := range changed {
-		v := seg.pending[name].(ref.Val)
-		st := s.states[name]
-		if err := st.set(ctx, v); err != nil {
-			return fmt.Errorf("causal: state %q: %w", name, err)
-		}
+	for _, n := range seg.order {
+		bound[n].set(ctx, seg.pending[n].(ref.Val))
 	}
-	for _, state := range changed {
-		for _, c := range e.dependents[state] {
+	for _, n := range seg.order {
+		for _, c := range r.dependents[n] {
 			s.ready[c] = true
 		}
 	}
@@ -213,4 +220,203 @@ func (e *Engine) commit(ctx context.Context, s *Runtime, seg *segment) error {
 	seg.pending = map[string]any{}
 	seg.order = nil
 	return nil
+}
+
+type functionCall func(context.Context, []ref.Val) ref.Val
+
+func functionAdapter(c symbolContract, fn any) (functionCall, error) {
+	bad := func() (functionCall, error) {
+		return nil, fmt.Errorf("function symbol %q implementation has incompatible type", c.symbol.Name)
+	}
+	switch f := fn.(type) {
+	case func(float64, float64) float64:
+		if c.result != "double" {
+			return bad()
+		}
+		return func(_ context.Context, a []ref.Val) ref.Val {
+			x, y, e := twoFloat(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Double(f(x, y))
+		}, nil
+	case func(context.Context, float64, float64) float64:
+		if c.result != "double" {
+			return bad()
+		}
+		return func(ctx context.Context, a []ref.Val) ref.Val {
+			x, y, e := twoFloat(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Double(f(ctx, x, y))
+		}, nil
+	case func(float64, float64) (float64, error):
+		if c.result != "double" {
+			return bad()
+		}
+		return func(_ context.Context, a []ref.Val) ref.Val {
+			x, y, e := twoFloat(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			v, e := f(x, y)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Double(v)
+		}, nil
+	case func(context.Context, float64, float64) (float64, error):
+		if c.result != "double" {
+			return bad()
+		}
+		return func(ctx context.Context, a []ref.Val) ref.Val {
+			x, y, e := twoFloat(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			v, e := f(ctx, x, y)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Double(v)
+		}, nil
+	case func(int64) int64:
+		if len(c.args) != 1 || c.result != "int" {
+			return bad()
+		}
+		return func(_ context.Context, a []ref.Val) ref.Val {
+			x, e := oneInt(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Int(f(x))
+		}, nil
+	case func(context.Context, int64) int64:
+		if len(c.args) != 1 || c.result != "int" {
+			return bad()
+		}
+		return func(ctx context.Context, a []ref.Val) ref.Val {
+			x, e := oneInt(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Int(f(ctx, x))
+		}, nil
+	case func(int64) (int64, error):
+		if len(c.args) != 1 || c.result != "int" {
+			return bad()
+		}
+		return func(_ context.Context, a []ref.Val) ref.Val {
+			x, e := oneInt(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			v, e := f(x)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Int(v)
+		}, nil
+	case func(context.Context, int64) (int64, error):
+		if len(c.args) != 1 || c.result != "int" {
+			return bad()
+		}
+		return func(ctx context.Context, a []ref.Val) ref.Val {
+			x, e := oneInt(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			v, e := f(ctx, x)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Int(v)
+		}, nil
+	case func(int64, int64) int64:
+		if len(c.args) != 2 || c.result != "int" {
+			return bad()
+		}
+		return func(_ context.Context, a []ref.Val) ref.Val {
+			x, y, e := twoInt(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Int(f(x, y))
+		}, nil
+	case func(context.Context, int64, int64) int64:
+		if len(c.args) != 2 || c.result != "int" {
+			return bad()
+		}
+		return func(ctx context.Context, a []ref.Val) ref.Val {
+			x, y, e := twoInt(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Int(f(ctx, x, y))
+		}, nil
+	case func(int64, int64) (int64, error):
+		if len(c.args) != 2 || c.result != "int" {
+			return bad()
+		}
+		return func(_ context.Context, a []ref.Val) ref.Val {
+			x, y, e := twoInt(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			v, e := f(x, y)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Int(v)
+		}, nil
+	case func(context.Context, int64, int64) (int64, error):
+		if len(c.args) != 2 || c.result != "int" {
+			return bad()
+		}
+		return func(ctx context.Context, a []ref.Val) ref.Val {
+			x, y, e := twoInt(a)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			v, e := f(ctx, x, y)
+			if e != nil {
+				return types.NewErr("%s", e)
+			}
+			return types.Int(v)
+		}, nil
+	}
+	return bad()
+}
+func twoInt(a []ref.Val) (int64, int64, error) {
+	if len(a) != 2 {
+		return 0, 0, fmt.Errorf("wrong argument count")
+	}
+	x, xok := a[0].Value().(int64)
+	y, yok := a[1].Value().(int64)
+	if !xok || !yok {
+		return 0, 0, fmt.Errorf("wrong argument type")
+	}
+	return x, y, nil
+}
+func oneInt(a []ref.Val) (int64, error) {
+	if len(a) != 1 {
+		return 0, fmt.Errorf("wrong argument count")
+	}
+	v, ok := a[0].Value().(int64)
+	if !ok {
+		return 0, fmt.Errorf("wrong argument type")
+	}
+	return v, nil
+}
+func twoFloat(a []ref.Val) (float64, float64, error) {
+	if len(a) != 2 {
+		return 0, 0, fmt.Errorf("wrong argument count")
+	}
+	x, xok := a[0].Value().(float64)
+	y, yok := a[1].Value().(float64)
+	if !xok || !yok {
+		return 0, 0, fmt.Errorf("wrong argument type")
+	}
+	return x, y, nil
 }

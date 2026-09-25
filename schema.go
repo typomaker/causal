@@ -1,325 +1,97 @@
 package causal
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
-	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/common/types"
-	"github.com/google/cel-go/common/types/ref"
+	"causal/ast"
 )
 
-type Program struct{ items []schemaItem }
-type schemaItem interface{ schemaItem() }
-type Declaration interface{ schemaItem() }
-type Statement interface{ operation() }
-type Block interface {
-	Declaration
-	Statement
+type Program struct {
+	AST       ast.Program
+	contracts []symbolContract
 }
+type Declaration interface{}
+type Statement = ast.Stmt
+type Block = ast.Case
+type symbolDeclaration struct{ contract symbolContract }
 
-// schemaItem lets independently built programs participate in Schema
-// composition alongside declarations created by the Go API.
-func (Program) schemaItem() {}
-
-func Schema(items ...Declaration) Program {
-	var internal []schemaItem
+func New(items ...Declaration) Program {
+	p := Program{}
 	for _, item := range items {
-		if program, ok := item.(Program); ok {
-			internal = append(internal, program.items...)
-			continue
+		switch x := item.(type) {
+		case symbolDeclaration:
+			p.contracts = append(p.contracts, x.contract)
+			p.AST.Symbols = append(p.AST.Symbols, x.contract.symbol)
+		case ast.Case:
+			p.AST.Cases = append(p.AST.Cases, x)
+		case Program:
+			p.AST.Cases = append(p.AST.Cases, x.AST.Cases...)
+			p.AST.Symbols = append(p.AST.Symbols, x.AST.Symbols...)
+			p.contracts = append(p.contracts, x.contracts...)
 		}
-		internal = append(internal, item)
 	}
-	return Program{items: internal}
+	return p
 }
 
-type caseDef struct {
-	name string
-	ops  []operation
+func Symbol[T any](name string) Declaration {
+	c, err := contractFor[T](name)
+	c.err = err
+	return symbolDeclaration{c}
 }
-
-func (*caseDef) schemaItem() {}
-func (*caseDef) operation()  {}
-func Case(name string, ops ...Statement) Block {
-	internal := make([]operation, len(ops))
-	for i, op := range ops {
-		internal[i] = op
+func Case(name string, statements ...Statement) Block {
+	return ast.Case{Name: name, Statements: statements}
+}
+func Self(name string) Statement               { return ast.Self{Symbol: name} }
+func With(expr string) Statement               { return ast.With{Expression: expr} }
+func Skip(expr string) Statement               { return ast.Skip{Expression: expr} }
+func Wait(expr string) Statement               { return ast.Wait{Expression: expr} }
+func (p Program) Compile() (*Runtime, error)   { return compile(p) }
+func (p Program) MarshalJSON() ([]byte, error) { return json.Marshal(p.AST) }
+func (p *Program) UnmarshalJSON(data []byte) error {
+	if p == nil {
+		return fmt.Errorf("causal: cannot unmarshal into nil Program")
 	}
-	return &caseDef{name, internal}
+	p.contracts = nil
+	return json.Unmarshal(data, &p.AST)
 }
 
-type funcDef struct {
-	name, signature string
-	args            []*cel.Type
-	result          *cel.Type
-	invoke          func(context.Context, []ref.Val) ref.Val
-	err             error
+type symbolContract struct {
+	symbol   ast.Symbol
+	kind     string
+	function bool
+	args     []string
+	result   string
+	err      error
 }
 
-func (*funcDef) schemaItem() {}
-
-// Func registers statically adapted CEL functions.
-// V1 supports the statically adapted signatures implemented by the package.
-func Func(name string, fn any) Declaration {
-	f := &funcDef{name: name}
-	switch x := fn.(type) {
-	case func(context.Context, float64, float64) (float64, error):
-		f.binary("(double,double)double", cel.DoubleType, func(c context.Context, a, b ref.Val) ref.Val {
-			av, e := as[float64](a)
-			if e != nil {
-				return celErr(e)
-			}
-			bv, e := as[float64](b)
-			if e != nil {
-				return celErr(e)
-			}
-			v, e := x(c, av, bv)
-			if e != nil {
-				return celErr(e)
-			}
-			return types.Double(v)
-		})
-	case func(context.Context, int64, int64) (int64, error):
-		f.binary("(int,int)int", cel.IntType, func(c context.Context, a, b ref.Val) ref.Val {
-			av, e := as[int64](a)
-			if e != nil {
-				return celErr(e)
-			}
-			bv, e := as[int64](b)
-			if e != nil {
-				return celErr(e)
-			}
-			v, e := x(c, av, bv)
-			if e != nil {
-				return celErr(e)
-			}
-			return types.Int(v)
-		})
-	case func(context.Context, float64, float64) float64:
-		f.binary("(double,double)double", cel.DoubleType, func(c context.Context, a, b ref.Val) ref.Val {
-			av, e := as[float64](a)
-			if e != nil {
-				return celErr(e)
-			}
-			bv, e := as[float64](b)
-			if e != nil {
-				return celErr(e)
-			}
-			return types.Double(x(c, av, bv))
-		})
-	case func(context.Context, int64, int64) int64:
-		f.binary("(int,int)int", cel.IntType, func(c context.Context, a, b ref.Val) ref.Val {
-			av, e := as[int64](a)
-			if e != nil {
-				return celErr(e)
-			}
-			bv, e := as[int64](b)
-			if e != nil {
-				return celErr(e)
-			}
-			return types.Int(x(c, av, bv))
-		})
-	case func(context.Context, int64) (int64, error):
-		f.unary("(int)int", cel.IntType, func(c context.Context, a ref.Val) ref.Val {
-			av, e := as[int64](a)
-			if e != nil {
-				return celErr(e)
-			}
-			v, e := x(c, av)
-			if e != nil {
-				return celErr(e)
-			}
-			return types.Int(v)
-		})
-	case func(context.Context, float64) (float64, error):
-		f.unary("(double)double", cel.DoubleType, func(c context.Context, a ref.Val) ref.Val {
-			av, e := as[float64](a)
-			if e != nil {
-				return celErr(e)
-			}
-			v, e := x(c, av)
-			if e != nil {
-				return celErr(e)
-			}
-			return types.Double(v)
-		})
+func contractFor[T any](name string) (symbolContract, error) {
+	var z T
+	c := symbolContract{symbol: ast.Symbol{Name: name}}
+	switch any(z).(type) {
+	case bool:
+		c.kind = "bool"
+	case string:
+		c.kind = "string"
+	case int64:
+		c.kind = "int"
+	case uint64:
+		c.kind = "uint"
+	case float64:
+		c.kind = "double"
+	case time.Duration:
+		c.kind = "duration"
+	case func(float64, float64) float64, func(context.Context, float64, float64) float64, func(float64, float64) (float64, error), func(context.Context, float64, float64) (float64, error):
+		c.function, c.args, c.result = true, []string{"double", "double"}, "double"
+	case func(int64) int64, func(context.Context, int64) int64, func(int64) (int64, error), func(context.Context, int64) (int64, error):
+		c.function, c.args, c.result = true, []string{"int"}, "int"
+	case func(int64, int64) int64, func(context.Context, int64, int64) int64, func(int64, int64) (int64, error), func(context.Context, int64, int64) (int64, error):
+		c.function, c.args, c.result = true, []string{"int", "int"}, "int"
 	default:
-		f.err = fmt.Errorf("causal: Func %q has unsupported static signature", name)
+		return c, fmt.Errorf("causal: Symbol %q has unsupported static type %T", name, z)
 	}
-	return f
-}
-func (f *funcDef) unary(sig string, t *cel.Type, call func(context.Context, ref.Val) ref.Val) {
-	f.signature = sig
-	f.args = []*cel.Type{t}
-	f.result = t
-	f.invoke = func(c context.Context, a []ref.Val) ref.Val {
-		if len(a) != 1 {
-			return types.NewErr("wrong argument count")
-		}
-		return call(c, a[0])
-	}
-}
-func (f *funcDef) binary(sig string, t *cel.Type, call func(context.Context, ref.Val, ref.Val) ref.Val) {
-	f.signature = sig
-	f.args = []*cel.Type{t, t}
-	f.result = t
-	f.invoke = func(c context.Context, a []ref.Val) ref.Val {
-		if len(a) != 2 {
-			return types.NewErr("wrong argument count")
-		}
-		return call(c, a[0], a[1])
-	}
-}
-func as[T any](v ref.Val) (T, error) {
-	var zero T
-	x, ok := v.Value().(T)
-	if !ok {
-		return zero, fmt.Errorf("cannot use CEL %s as function argument", v.Type())
-	}
-	return x, nil
-}
-func celErr(err error) ref.Val { return types.NewErr("%s", err) }
-func validateFunc(f *funcDef) error {
-	if f.name == "" {
-		return fmt.Errorf("causal: function name is empty")
-	}
-	return f.err
-}
-
-type operation interface{ operation() }
-type selfOp struct{ name string }
-type withOp struct{ expr string }
-type skipOp struct{ expr string }
-type waitOp struct{ expr string }
-type caseRefOp struct{ name string }
-type resolvedCaseRef struct{ def *caseDef }
-
-func (selfOp) operation()          {}
-func (withOp) operation()          {}
-func (skipOp) operation()          {}
-func (waitOp) operation()          {}
-func (caseRefOp) operation()       {}
-func (resolvedCaseRef) operation() {}
-func Self(n string) Statement      { return selfOp{n} }
-func With(e string) Statement      { return withOp{e} }
-func Skip(e string) Statement      { return skipOp{e} }
-func Wait(e string) Statement      { return waitOp{e} }
-
-type operationJSON map[string]string
-
-func (s Program) MarshalJSON() ([]byte, error) {
-	out := map[string][]operationJSON{}
-	seen := map[*caseDef]bool{}
-	var addCase func(*caseDef) error
-	addCase = func(c *caseDef) error {
-		if seen[c] {
-			return nil
-		}
-		seen[c] = true
-		if _, exists := out[c.name]; exists {
-			return fmt.Errorf("causal: duplicate case %q", c.name)
-		}
-		ops := make([]operationJSON, 0, len(c.ops))
-		out[c.name] = ops
-		for _, raw := range c.ops {
-			switch x := raw.(type) {
-			case selfOp:
-				ops = append(ops, operationJSON{"self": x.name})
-			case withOp:
-				ops = append(ops, operationJSON{"with": x.expr})
-			case skipOp:
-				ops = append(ops, operationJSON{"skip": x.expr})
-			case waitOp:
-				ops = append(ops, operationJSON{"wait": x.expr})
-			case caseRefOp:
-				ops = append(ops, operationJSON{"case": x.name})
-			case resolvedCaseRef:
-				ops = append(ops, operationJSON{"case": x.def.name})
-			case *caseDef:
-				ops = append(ops, operationJSON{"case": x.name})
-				if err := addCase(x); err != nil {
-					return err
-				}
-			default:
-				return fmt.Errorf("causal: unsupported operation %T", raw)
-			}
-		}
-		out[c.name] = ops
-		return nil
-	}
-	for _, i := range s.items {
-		switch x := i.(type) {
-		case *caseDef:
-			if err := addCase(x); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return json.Marshal(out)
-}
-
-func (s *Program) UnmarshalJSON(data []byte) error {
-	if s == nil {
-		return fmt.Errorf("causal: cannot unmarshal Schema into nil Program")
-	}
-	var encoded map[string]json.RawMessage
-	if err := json.Unmarshal(data, &encoded); err != nil {
-		return err
-	}
-	if encoded == nil {
-		return fmt.Errorf("causal schema must be a JSON object")
-	}
-	document := make(map[string][]json.RawMessage, len(encoded))
-	for name, raw := range encoded {
-		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			return fmt.Errorf("case %q must be an array of operators", name)
-		}
-		var operators []json.RawMessage
-		if err := json.Unmarshal(raw, &operators); err != nil {
-			return fmt.Errorf("case %q must be an array of operators: %w", name, err)
-		}
-		document[name] = operators
-	}
-	items := make([]schemaItem, 0, len(document))
-	for name, raws := range document {
-		if name == "" {
-			return fmt.Errorf("causal: case name is empty")
-		}
-		ops := make([]operation, 0, len(raws))
-		for _, raw := range raws {
-			var fields map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &fields); err != nil {
-				return fmt.Errorf("case %q: invalid operator: %w", name, err)
-			}
-			if len(fields) != 1 {
-				return fmt.Errorf("operator must contain exactly one operation")
-			}
-			for operator, value := range fields {
-				var text string
-				if err := json.Unmarshal(value, &text); err != nil {
-					return fmt.Errorf("causal operator %q value must be string", operator)
-				}
-				switch operator {
-				case "self":
-					ops = append(ops, selfOp{text})
-				case "with":
-					ops = append(ops, withOp{text})
-				case "skip":
-					ops = append(ops, skipOp{text})
-				case "wait":
-					ops = append(ops, waitOp{text})
-				case "case":
-					ops = append(ops, caseRefOp{text})
-				default:
-					return fmt.Errorf("unknown causal operator %q", operator)
-				}
-			}
-		}
-		items = append(items, &caseDef{name: name, ops: ops})
-	}
-	s.items = items
-	return nil
+	c.symbol.Type, c.symbol.Function, c.symbol.Arguments, c.symbol.Result = c.kind, c.function, c.args, c.result
+	return c, nil
 }
