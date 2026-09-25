@@ -55,25 +55,19 @@ if err != nil {
 
 var scope causal.Scope
 err = runtime.Do(ctx, &scope, "deposit",
-    causal.Bind("balance",
-        causal.Getter(func() int64 { return account.Balance }),
-        causal.Setter(func(value int64) {
-            account.Balance = value
-        }),
-    ),
-    causal.Bind("amount",
-        causal.Getter(func() int64 { return command.Amount }),
-    ),
+    causal.Bind("balance", &account.Balance),
+    causal.Bind("amount", &command.Amount),
 )
 ```
 
 Only symbols required by the selected root case need bindings. A written symbol
-requires both a getter and a setter; a read-only symbol requires only a getter.
+and a read-only symbol both use a non-nil pointer of the declared type. The
+program determines whether the value is written.
 
 ## Updating several variables
 
 Several `Self`/`With` pairs form one staged segment. If expression evaluation or
-validation fails, none of the setters for that segment are called.
+validation fails, none of the pointers for that segment are changed.
 
 ```go
 causal.Case("complete_quest",
@@ -87,8 +81,7 @@ causal.Case("complete_quest",
 ```
 
 This is useful for transition-like updates of two or three related variables.
-Setters should remain small and deterministic: they are invoked sequentially
-after the whole segment has been validated.
+Pointer writes occur sequentially after the whole segment has been validated.
 
 ## Nested and reusable cases
 
@@ -231,11 +224,11 @@ part of the CEL signature stored in JSON:
 }
 ```
 
-Getters and setters intentionally support only these forms:
+Value symbols use pointers, while function symbols use functions:
 
 ```go
-func() T
-func(T)
+causal.Bind("health", &character.Health)
+causal.Bind("calculate_damage", calculateDamage)
 ```
 
 ## Scope persistence

@@ -26,8 +26,8 @@ func TestNewAPIExecutionWaitAndFullBindingContract(t *testing.T) {
 	var s causal.Scope
 	s.SetClock(func() time.Time { return now })
 	bindings := []causal.Binding{
-		causal.Bind("health", causal.Getter(func() float64 { return health }), causal.Setter(func(v float64) { health = v })),
-		causal.Bind("damage", causal.Getter(func() float64 { return damage })),
+		causal.Bind("health", &health),
+		causal.Bind("damage", &damage),
 	}
 	if err := r.Do(context.Background(), &s, "attack", bindings...); err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestFunctionSymbolsAndErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	var s causal.Scope
-	value := causal.Bind("v", causal.Getter(func() int64 { return v }), causal.Setter(func(x int64) { v = x }))
+	value := causal.Bind("v", &v)
 	if err := r.Do(context.Background(), &s, "x", value, causal.Bind("twice", func(context.Context, int64) (int64, error) { return 0, errors.New("boom") })); err == nil {
 		t.Fatal("expected function error")
 	}
@@ -109,7 +109,7 @@ func TestCompleteProgramFromJSON(t *testing.T) {
 	value := ""
 	var scope causal.Scope
 	bindings := []causal.Binding{
-		causal.Bind("value", causal.Getter(func() string { return value }), causal.Setter(func(v string) { value = v })),
+		causal.Bind("value", &value),
 		causal.Bind("choose", func(text string, enabled bool, count uint64) string {
 			if enabled && count == 2 {
 				return text
@@ -146,7 +146,7 @@ func TestMatchingJSONAndGoSymbolsAreMerged(t *testing.T) {
 	}
 
 	value := int64(1)
-	state := causal.Bind("value", causal.Getter(func() int64 { return value }), causal.Setter(func(next int64) { value = next }))
+	state := causal.Bind("value", &value)
 	var scope causal.Scope
 	if err := runtime.Do(context.Background(), &scope, "x", state, causal.Bind("increment", func(int64) int64 { return 0 })); err == nil {
 		t.Fatal("merged function symbol lost its Go signature")
@@ -179,8 +179,8 @@ func TestBindingValidationAndZeroScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	var s causal.Scope
-	get := causal.Getter(func() int64 { return 1 })
-	for _, bindings := range [][]causal.Binding{{}, {causal.Bind("v", get)}, {causal.Bind("v", causal.Getter(func() float64 { return 1 }))}, {causal.Bind("other", get)}} {
+	good, wrong := int64(1), float64(1)
+	for _, bindings := range [][]causal.Binding{{}, {causal.Bind("v", &wrong)}, {causal.Bind("v", good)}, {causal.Bind("other", &good)}} {
 		if err := r.Do(context.Background(), &s, "x", bindings...); err == nil {
 			t.Fatalf("accepted %#v", bindings)
 		}
@@ -188,6 +188,93 @@ func TestBindingValidationAndZeroScope(t *testing.T) {
 	if err := r.Do(context.Background(), nil, "x"); err == nil {
 		t.Fatal("accepted nil scope")
 	}
+}
+
+func TestPointerBindingValidation(t *testing.T) {
+	program := causal.New(
+		causal.Symbol[int64]("value"),
+		causal.Symbol[func(int64) int64]("transform"),
+		causal.Case("run", causal.Self("value"), causal.With("transform(value)")),
+	)
+	runtime, err := program.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	value := int64(1)
+	wrong := float64(1)
+	var nilValue *int64
+	validFunction := func(v int64) int64 { return v + 1 }
+	tests := []struct {
+		name     string
+		bindings []causal.Binding
+	}{
+		{"nil pointer", []causal.Binding{causal.Bind("value", nilValue), causal.Bind("transform", validFunction)}},
+		{"wrong pointer type", []causal.Binding{causal.Bind("value", &wrong), causal.Bind("transform", validFunction)}},
+		{"non-pointer value", []causal.Binding{causal.Bind("value", value), causal.Bind("transform", validFunction)}},
+		{"pointer for function", []causal.Binding{causal.Bind("value", &value), causal.Bind("transform", &validFunction)}},
+		{"function for value", []causal.Binding{causal.Bind("value", func() int64 { return value }), causal.Bind("transform", validFunction)}},
+		{"missing binding", []causal.Binding{causal.Bind("value", &value)}},
+		{"duplicate binding", []causal.Binding{causal.Bind("value", &value), causal.Bind("value", &value), causal.Bind("transform", validFunction)}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var scope causal.Scope
+			if err := runtime.Do(context.Background(), &scope, "run", test.bindings...); err == nil {
+				t.Fatal("binding validation succeeded")
+			}
+			if value != 1 {
+				t.Fatalf("validation changed value to %d", value)
+			}
+		})
+	}
+}
+
+func TestPointerBindingAtomicityAndRepeatedWrite(t *testing.T) {
+	t.Run("failed segment does not write any pointer", func(t *testing.T) {
+		x, y := int64(10), int64(20)
+		program := causal.New(
+			causal.Symbol[int64]("x"),
+			causal.Symbol[int64]("y"),
+			causal.Symbol[func(int64) (int64, error)]("fail"),
+			causal.Case("run", causal.Self("x"), causal.With("x+1"), causal.Self("y"), causal.With("fail(y)")),
+		)
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scope causal.Scope
+		err = runtime.Do(context.Background(), &scope, "run",
+			causal.Bind("x", &x),
+			causal.Bind("y", &y),
+			causal.Bind("fail", func(int64) (int64, error) { return 0, errors.New("failed") }),
+		)
+		if err == nil {
+			t.Fatal("expected expression failure")
+		}
+		if x != 10 || y != 20 {
+			t.Fatalf("partial commit: x=%d y=%d", x, y)
+		}
+	})
+
+	t.Run("later expression reads pending value", func(t *testing.T) {
+		x := int64(10)
+		program := causal.New(
+			causal.Symbol[int64]("x"),
+			causal.Case("run", causal.Self("x"), causal.With("x+1"), causal.Self("x"), causal.With("x*2")),
+		)
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scope causal.Scope
+		if err := runtime.Do(context.Background(), &scope, "run", causal.Bind("x", &x)); err != nil {
+			t.Fatal(err)
+		}
+		if x != 22 {
+			t.Fatalf("x=%d, want 22", x)
+		}
+	})
 }
 
 func TestCompileValidation(t *testing.T) {
@@ -210,7 +297,7 @@ func TestScopeJSONContinuation(t *testing.T) {
 	v := int64(0)
 	p := causal.New(causal.Symbol[int64]("v"), causal.Case("x", causal.Self("v"), causal.With("v+1"), causal.Wait(`duration("1s")`), causal.With("v+1")))
 	r, _ := p.Compile()
-	b := causal.Bind("v", causal.Getter(func() int64 { return v }), causal.Setter(func(x int64) { v = x }))
+	b := causal.Bind("v", &v)
 	var s causal.Scope
 	s.SetClock(func() time.Time { return now })
 	if err := r.Do(context.Background(), &s, "x", b); err != nil {
@@ -242,7 +329,7 @@ func TestArbitraryFunctionSymbolSignature(t *testing.T) {
 		t.Fatal(err)
 	}
 	var scope causal.Scope
-	state := causal.Bind("value", causal.Getter(func() string { return value }), causal.Setter(func(v string) { value = v }))
+	state := causal.Bind("value", &value)
 	if err := r.Do(context.Background(), &scope, "x", state); err == nil || !strings.Contains(err.Error(), "choose") {
 		t.Fatalf("missing function was not prevalidated: %v", err)
 	}

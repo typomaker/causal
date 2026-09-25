@@ -38,18 +38,9 @@ func Example() {
 
 	health, energy, score := int64(50), int64(20), int64(0)
 	bindings := []causal.Binding{
-		causal.Bind("health",
-			causal.Getter(func() int64 { return health }),
-			causal.Setter(func(value int64) { health = value }),
-		),
-		causal.Bind("energy",
-			causal.Getter(func() int64 { return energy }),
-			causal.Setter(func(value int64) { energy = value }),
-		),
-		causal.Bind("score",
-			causal.Getter(func() int64 { return score }),
-			causal.Setter(func(value int64) { score = value }),
-		),
+		causal.Bind("health", &health),
+		causal.Bind("energy", &energy),
+		causal.Bind("score", &score),
 	}
 
 	var scope causal.Scope

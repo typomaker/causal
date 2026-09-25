@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func TestStaticKindsAndContracts(t *testing.T) {
 	if decls[6].(symbolDeclaration).contract.err == nil {
 		t.Fatal("unsupported type")
 	}
-	if valueKind[bool]() != "bool" || valueKind[string]() != "string" || valueKind[uint64]() != "uint" || valueKind[time.Duration]() != "duration" || valueKind[struct{}]() == "" {
+	if kind, ok := kindForType(reflect.TypeFor[bool]()); !ok || kind != "bool" {
 		t.Fatal("kinds")
 	}
 }
@@ -78,7 +79,7 @@ func TestNestedCasesReadinessAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := int64(1)
-	b := Bind("v", Getter(func() int64 { return v }), Setter(func(x int64) { v = x }))
+	b := Bind("v", &v)
 	var s Scope
 	if err := r.Do(context.Background(), &s, "root", b); err != nil {
 		t.Fatal(err)
@@ -136,7 +137,8 @@ func TestHelperAndErrorBranches(t *testing.T) {
 	}
 	p := New(Symbol[int64]("v"), Case("x", Self("v"), With("v+1")))
 	r, _ := p.Compile()
-	b := Bind("v", Getter(func() int64 { return 1 }), Setter(func(int64) {}))
+	v := int64(1)
+	b := Bind("v", &v)
 	var s Scope
 	if err := r.Do(context.Background(), &s, "missing", b); err == nil {
 		t.Fatal()
@@ -144,10 +146,10 @@ func TestHelperAndErrorBranches(t *testing.T) {
 	if err := r.Do(context.Background(), &s, "x", b, b); err == nil {
 		t.Fatal()
 	}
-	if err := r.Do(context.Background(), &s, "x", Bind("", Getter(func() int64 { return 1 }))); err == nil {
+	if err := r.Do(context.Background(), &s, "x", Bind("", &v)); err == nil {
 		t.Fatal()
 	}
-	bad := Bind("v", Getter(func() int64 { return 1 }), Getter(func() float64 { return 1 }))
+	bad := Bind("v", float64(1))
 	if err := r.Do(context.Background(), &s, "x", bad); err == nil {
 		t.Fatal()
 	}
@@ -241,7 +243,7 @@ func TestAdditionalRuntimeBranches(t *testing.T) {
 	}
 	r, _ := base.Compile()
 	v := int64(0)
-	b := Bind("v", Getter(func() int64 { return v }), Setter(func(x int64) { v = x }))
+	b := Bind("v", &v)
 	var s Scope
 	s.runtimeVersion = r.version
 	s.continuations = map[string]continuation{"x": {RootCase: "bad", PC: 0, Version: r.version}}
@@ -254,10 +256,11 @@ func TestAdditionalRuntimeBranches(t *testing.T) {
 	if !errors.Is(r.Do(ctx, &s, "x", b), context.Canceled) {
 		t.Fatal()
 	}
-	if err := r.Do(context.Background(), &s, "x", Bind("v", Getter(func() int64 { return 1 }), Setter(func(float64) {}))); err == nil {
+	wrong := float64(1)
+	if err := r.Do(context.Background(), &s, "x", Bind("v", &wrong)); err == nil {
 		t.Fatal()
 	}
-	if err := r.Do(context.Background(), &s, "x", Bind("v", b, b)); err == nil {
+	if err := r.Do(context.Background(), &s, "x", Bind("v", func() int64 { return 1 })); err == nil {
 		t.Fatal()
 	}
 

@@ -28,12 +28,11 @@ type instruction struct {
 	ast            *cel.Ast
 	jump           int
 }
-type bindingRequirement struct{ write, function bool }
 type compiledCase struct {
 	name         string
 	code         []instruction
 	deps         map[string]struct{}
-	requirements map[string]bindingRequirement
+	requirements map[string]struct{}
 }
 
 // Runtime is an immutable compiled program and is safe for concurrent use.
@@ -114,7 +113,7 @@ func compile(program Program) (*Runtime, error) {
 	}
 	r := &Runtime{env: env, cases: map[string]*compiledCase{}, contracts: contracts, dependents: map[string][]string{}, version: programVersion(program, contracts)}
 	for _, def := range program.AST.Cases {
-		cc := &compiledCase{name: def.Name, deps: map[string]struct{}{}, requirements: map[string]bindingRequirement{}}
+		cc := &compiledCase{name: def.Name, deps: map[string]struct{}{}, requirements: map[string]struct{}{}}
 		if _, err := compileStatements(env, def, defs, &cc.code, cc.deps, cc.requirements, "", []string{def.Name}); err != nil {
 			return nil, fmt.Errorf("causal: case %q: %w", def.Name, err)
 		}
@@ -123,8 +122,7 @@ func compile(program Program) (*Runtime, error) {
 			if !ok || c.function {
 				return nil, fmt.Errorf("causal: case %q: undeclared value symbol %q", def.Name, dep)
 			}
-			q := cc.requirements[dep]
-			cc.requirements[dep] = q
+			cc.requirements[dep] = struct{}{}
 			r.dependents[dep] = append(r.dependents[dep], def.Name)
 		}
 		for name, c := range contracts {
@@ -133,7 +131,7 @@ func compile(program Program) (*Runtime, error) {
 				return nil, err
 			}
 			if c.function && used {
-				cc.requirements[name] = bindingRequirement{function: true}
+				cc.requirements[name] = struct{}{}
 			}
 		}
 		r.cases[def.Name] = cc
@@ -141,7 +139,7 @@ func compile(program Program) (*Runtime, error) {
 	return r, nil
 }
 
-func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code *[]instruction, deps map[string]struct{}, req map[string]bindingRequirement, self string, path []string) (string, error) {
+func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code *[]instruction, deps map[string]struct{}, req map[string]struct{}, self string, path []string) (string, error) {
 	start := len(*code)
 	for _, raw := range c.Statements {
 		switch s := raw.(type) {
@@ -162,9 +160,7 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code 
 				return self, err
 			}
 			deps[self] = struct{}{}
-			q := req[self]
-			q.write = true
-			req[self] = q
+			req[self] = struct{}{}
 			*code = append(*code, instruction{kind: instWith, target: self, source: s.Expression, ast: a})
 		case ast.Skip:
 			a, e := compileExpr(env, s.Expression)

@@ -3,86 +3,44 @@ package causal
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/google/cel-go/common/types/ref"
+	"reflect"
 	"sync"
 	"time"
 )
 
-type bindingOption interface{ apply(*Binding) error }
-type bindingOptionFunc func(*Binding) error
-
-func (f bindingOptionFunc) apply(b *Binding) error { return f(b) }
-
 // Binding supplies the runtime implementation of one Symbol.
 type Binding struct {
-	name, kind string
-	get        func() any
-	validate   func(ref.Val) error
-	set        func(ref.Val)
-	function   any
-	err        error
+	name      string
+	value     reflect.Value
+	valueType reflect.Type
+	function  any
+	err       error
 }
 
-func Bind(name string, implementations ...any) Binding {
+// Bind associates a value Symbol with a non-nil pointer, or a function Symbol
+// with a function of its declared signature.
+func Bind(name string, implementation any) Binding {
 	b := Binding{name: name}
-	for _, raw := range implementations {
-		if o, ok := raw.(bindingOption); ok {
-			if e := o.apply(&b); e != nil {
-				b.err = e
-			}
-		} else if b.function == nil {
-			b.function = raw
-		} else {
-			b.err = fmt.Errorf("multiple function implementations")
+	t := reflect.TypeOf(implementation)
+	if t == nil {
+		b.err = fmt.Errorf("implementation is nil")
+		return b
+	}
+	switch t.Kind() {
+	case reflect.Pointer:
+		v := reflect.ValueOf(implementation)
+		if v.IsNil() {
+			b.err = fmt.Errorf("value pointer is nil")
+			return b
 		}
+		b.value = v
+		b.valueType = t.Elem()
+	case reflect.Func:
+		b.function = implementation
+	default:
+		b.err = fmt.Errorf("implementation has type %v, want non-nil pointer or function", t)
 	}
 	return b
-}
-func Getter[T any](fn func() T) bindingOption {
-	return bindingOptionFunc(func(b *Binding) error {
-		k := valueKind[T]()
-		if b.kind != "" && b.kind != k {
-			return fmt.Errorf("getter/setter value types differ")
-		}
-		b.kind = k
-		b.get = func() any { return fn() }
-		return nil
-	})
-}
-func Setter[T any](fn func(T)) bindingOption {
-	return bindingOptionFunc(func(b *Binding) error {
-		k := valueKind[T]()
-		if b.kind != "" && b.kind != k {
-			return fmt.Errorf("getter/setter value types differ")
-		}
-		b.kind = k
-		b.validate = func(v ref.Val) error {
-			if _, ok := v.Value().(T); !ok {
-				return fmt.Errorf("cannot assign CEL %s to %s Symbol", v.Type(), k)
-			}
-			return nil
-		}
-		b.set = func(v ref.Val) { fn(v.Value().(T)) }
-		return nil
-	})
-}
-func valueKind[T any]() string {
-	var z T
-	switch any(z).(type) {
-	case bool:
-		return "bool"
-	case string:
-		return "string"
-	case int64:
-		return "int"
-	case uint64:
-		return "uint"
-	case float64:
-		return "double"
-	case time.Duration:
-		return "duration"
-	}
-	return fmt.Sprintf("unsupported:%T", z)
 }
 
 type continuation struct {

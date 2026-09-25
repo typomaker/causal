@@ -124,29 +124,27 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[strin
 			return nil, fmt.Errorf("binding for undeclared symbol %q", b.name)
 		}
 		if c.function {
-			if b.function == nil {
-				return nil, fmt.Errorf("function symbol %q has no implementation", b.name)
+			if b.function == nil || b.value.IsValid() {
+				return nil, fmt.Errorf("function symbol %q binding must be a function", b.name)
 			}
 			if _, err := functionAdapter(c, b.function); err != nil {
 				return nil, err
 			}
 		} else {
-			if b.get == nil {
-				return nil, fmt.Errorf("symbol %q has no Getter", b.name)
+			if !b.value.IsValid() || b.function != nil {
+				return nil, fmt.Errorf("value symbol %q binding must be a non-nil pointer", b.name)
 			}
-			if b.kind != c.kind {
-				return nil, fmt.Errorf("symbol %q binding type %s does not match %s", b.name, b.kind, c.kind)
+			kind, supported := kindForType(b.valueType)
+			if !supported || kind != c.kind || c.goType != nil && b.valueType != c.goType {
+				return nil, fmt.Errorf("symbol %q binding type %v does not match %s", b.name, b.valueType, c.kind)
 			}
 		}
 		m[b.name] = b
 	}
-	for n, q := range cc.requirements {
-		b, ok := m[n]
+	for n := range cc.requirements {
+		_, ok := m[n]
 		if !ok {
 			return nil, fmt.Errorf("missing binding for symbol %q", n)
-		}
-		if q.write && b.set == nil {
-			return nil, fmt.Errorf("symbol %q is read-only", n)
 		}
 	}
 	return m, nil
@@ -171,7 +169,7 @@ func (r *Runtime) eval(ctx context.Context, bound map[string]Binding, seg *segme
 			activation[dep] = v
 			continue
 		}
-		v := bound[dep].get()
+		v := bound[dep].value.Elem().Interface()
 		seg.snapshot[dep] = v
 		activation[dep] = v
 	}
@@ -215,12 +213,13 @@ func (r *Runtime) commit(ctx context.Context, s *Scope, bound map[string]Binding
 	}
 	for _, n := range seg.order {
 		v := seg.pending[n].(ref.Val)
-		if err := bound[n].validate(v); err != nil {
-			return fmt.Errorf("causal: symbol %q: %w", n, err)
+		native := reflect.ValueOf(v.Value())
+		if !native.IsValid() || !native.Type().AssignableTo(bound[n].valueType) {
+			return fmt.Errorf("causal: symbol %q: cannot assign CEL %s to %v Symbol", n, v.Type(), bound[n].valueType)
 		}
 	}
 	for _, n := range seg.order {
-		bound[n].set(seg.pending[n].(ref.Val))
+		bound[n].value.Elem().Set(reflect.ValueOf(seg.pending[n].(ref.Val).Value()))
 	}
 	for _, n := range seg.order {
 		for _, c := range r.dependents[n] {
