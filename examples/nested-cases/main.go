@@ -19,30 +19,14 @@ type player struct {
 	score  int64
 }
 
-func goProgram() causal.Program {
+func goCases() causal.Program {
 	return causal.New(
-		causal.Symbol[int64]("health"),
-		causal.Symbol[int64]("energy"),
-		causal.Symbol[int64]("score"),
-
-		causal.Case("game_turn",
-			// This nested case atomically updates two variables.
-			causal.Case("heal",
-				causal.Self("health"),
-				causal.With("health + 20"),
-				causal.Self("energy"),
-				causal.With("energy - 5"),
-			),
-
-			// This nested case atomically updates three variables.
-			causal.Case("complete_quest",
-				causal.Self("score"),
-				causal.With("score + 100"),
-				causal.Self("energy"),
-				causal.With("energy + 2"),
-				causal.Self("health"),
-				causal.With("health + 5"),
-			),
+		// game_turn in program.json references this Go case.
+		causal.Case("heal",
+			causal.Self("health"),
+			causal.With("health + 20"),
+			causal.Self("energy"),
+			causal.With("energy - 5"),
 		),
 	)
 }
@@ -51,6 +35,14 @@ func jsonProgram() (causal.Program, error) {
 	var program causal.Program
 	err := json.Unmarshal(jsonSource, &program)
 	return program, err
+}
+
+func combinedProgram() (causal.Program, error) {
+	fromJSON, err := jsonProgram()
+	if err != nil {
+		return causal.Program{}, err
+	}
+	return causal.New(fromJSON, goCases()), nil
 }
 
 func execute(ctx context.Context, program causal.Program) (player, error) {
@@ -83,20 +75,14 @@ func execute(ctx context.Context, program causal.Program) (player, error) {
 }
 
 func main() {
-	fromGo, err := execute(context.Background(), goProgram())
+	program, err := combinedProgram()
+	if err != nil {
+		log.Fatal(err)
+	}
+	state, err := execute(context.Background(), program)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	declaration, err := jsonProgram()
-	if err != nil {
-		log.Fatal(err)
-	}
-	fromJSON, err := execute(context.Background(), declaration)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("Go:   health=%d energy=%d score=%d\n", fromGo.health, fromGo.energy, fromGo.score)
-	fmt.Printf("JSON: health=%d energy=%d score=%d\n", fromJSON.health, fromJSON.energy, fromJSON.score)
+	fmt.Printf("Combined: health=%d energy=%d score=%d\n", state.health, state.energy, state.score)
 }

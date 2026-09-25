@@ -7,26 +7,19 @@ import (
 	"causal"
 )
 
-func TestGoAndJSONProgramsProduceSameState(t *testing.T) {
-	jsonDeclaration, err := jsonProgram()
+func TestCombinedProgram(t *testing.T) {
+	program, err := combinedProgram()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for name, program := range map[string]causal.Program{
-		"Go":   goProgram(),
-		"JSON": jsonDeclaration,
-	} {
-		t.Run(name, func(t *testing.T) {
-			got, err := execute(context.Background(), program)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := player{health: 75, energy: 17, score: 100}
-			if got != want {
-				t.Fatalf("state = %+v, want %+v", got, want)
-			}
-		})
+	got, err := execute(context.Background(), program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := player{health: 75, energy: 17, score: 100}
+	if got != want {
+		t.Fatalf("state = %+v, want %+v", got, want)
 	}
 }
 
@@ -40,7 +33,11 @@ func TestExecuteReportsCompileError(t *testing.T) {
 func TestExecuteReportsRuntimeError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := execute(ctx, goProgram())
+	program, err := combinedProgram()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = execute(ctx, program)
 	if err == nil {
 		t.Fatal("execute ignored context cancellation")
 	}

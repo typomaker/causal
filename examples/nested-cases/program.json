@@ -8,12 +8,6 @@
     { "case": "heal" },
     { "case": "complete_quest" }
   ],
-  "heal": [
-    { "self": "health" },
-    { "with": "health + 20" },
-    { "self": "energy" },
-    { "with": "energy - 5" }
-  ],
   "complete_quest": [
     { "self": "score" },
     { "with": "score + 100" },
