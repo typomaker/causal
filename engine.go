@@ -7,6 +7,7 @@ import (
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/interpreter/functions"
+	"reflect"
 )
 
 type segment struct {
@@ -225,198 +226,37 @@ func (r *Runtime) commit(ctx context.Context, s *Scope, bound map[string]Binding
 type functionCall func(context.Context, []ref.Val) ref.Val
 
 func functionAdapter(c symbolContract, fn any) (functionCall, error) {
-	bad := func() (functionCall, error) {
-		return nil, fmt.Errorf("function symbol %q implementation has incompatible type", c.symbol.Name)
+	t := reflect.TypeOf(fn)
+	if t == nil || t != c.goType {
+		return nil, fmt.Errorf("function symbol %q implementation has type %v, want %v", c.symbol.Name, t, c.goType)
 	}
-	switch f := fn.(type) {
-	case func(float64, float64) float64:
-		if c.result != "double" {
-			return bad()
-		}
-		return func(_ context.Context, a []ref.Val) ref.Val {
-			x, y, e := twoFloat(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Double(f(x, y))
-		}, nil
-	case func(context.Context, float64, float64) float64:
-		if c.result != "double" {
-			return bad()
-		}
-		return func(ctx context.Context, a []ref.Val) ref.Val {
-			x, y, e := twoFloat(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Double(f(ctx, x, y))
-		}, nil
-	case func(float64, float64) (float64, error):
-		if c.result != "double" {
-			return bad()
-		}
-		return func(_ context.Context, a []ref.Val) ref.Val {
-			x, y, e := twoFloat(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			v, e := f(x, y)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Double(v)
-		}, nil
-	case func(context.Context, float64, float64) (float64, error):
-		if c.result != "double" {
-			return bad()
-		}
-		return func(ctx context.Context, a []ref.Val) ref.Val {
-			x, y, e := twoFloat(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			v, e := f(ctx, x, y)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Double(v)
-		}, nil
-	case func(int64) int64:
-		if len(c.args) != 1 || c.result != "int" {
-			return bad()
-		}
-		return func(_ context.Context, a []ref.Val) ref.Val {
-			x, e := oneInt(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Int(f(x))
-		}, nil
-	case func(context.Context, int64) int64:
-		if len(c.args) != 1 || c.result != "int" {
-			return bad()
-		}
-		return func(ctx context.Context, a []ref.Val) ref.Val {
-			x, e := oneInt(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Int(f(ctx, x))
-		}, nil
-	case func(int64) (int64, error):
-		if len(c.args) != 1 || c.result != "int" {
-			return bad()
-		}
-		return func(_ context.Context, a []ref.Val) ref.Val {
-			x, e := oneInt(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			v, e := f(x)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Int(v)
-		}, nil
-	case func(context.Context, int64) (int64, error):
-		if len(c.args) != 1 || c.result != "int" {
-			return bad()
-		}
-		return func(ctx context.Context, a []ref.Val) ref.Val {
-			x, e := oneInt(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			v, e := f(ctx, x)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Int(v)
-		}, nil
-	case func(int64, int64) int64:
-		if len(c.args) != 2 || c.result != "int" {
-			return bad()
-		}
-		return func(_ context.Context, a []ref.Val) ref.Val {
-			x, y, e := twoInt(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Int(f(x, y))
-		}, nil
-	case func(context.Context, int64, int64) int64:
-		if len(c.args) != 2 || c.result != "int" {
-			return bad()
-		}
-		return func(ctx context.Context, a []ref.Val) ref.Val {
-			x, y, e := twoInt(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Int(f(ctx, x, y))
-		}, nil
-	case func(int64, int64) (int64, error):
-		if len(c.args) != 2 || c.result != "int" {
-			return bad()
-		}
-		return func(_ context.Context, a []ref.Val) ref.Val {
-			x, y, e := twoInt(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			v, e := f(x, y)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Int(v)
-		}, nil
-	case func(context.Context, int64, int64) (int64, error):
-		if len(c.args) != 2 || c.result != "int" {
-			return bad()
-		}
-		return func(ctx context.Context, a []ref.Val) ref.Val {
-			x, y, e := twoInt(a)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			v, e := f(ctx, x, y)
-			if e != nil {
-				return types.NewErr("%s", e)
-			}
-			return types.Int(v)
-		}, nil
+	f := reflect.ValueOf(fn)
+	if f.IsNil() {
+		return nil, fmt.Errorf("function symbol %q implementation is nil", c.symbol.Name)
 	}
-	return bad()
-}
-func twoInt(a []ref.Val) (int64, int64, error) {
-	if len(a) != 2 {
-		return 0, 0, fmt.Errorf("wrong argument count")
-	}
-	x, xok := a[0].Value().(int64)
-	y, yok := a[1].Value().(int64)
-	if !xok || !yok {
-		return 0, 0, fmt.Errorf("wrong argument type")
-	}
-	return x, y, nil
-}
-func oneInt(a []ref.Val) (int64, error) {
-	if len(a) != 1 {
-		return 0, fmt.Errorf("wrong argument count")
-	}
-	v, ok := a[0].Value().(int64)
-	if !ok {
-		return 0, fmt.Errorf("wrong argument type")
-	}
-	return v, nil
-}
-func twoFloat(a []ref.Val) (float64, float64, error) {
-	if len(a) != 2 {
-		return 0, 0, fmt.Errorf("wrong argument count")
-	}
-	x, xok := a[0].Value().(float64)
-	y, yok := a[1].Value().(float64)
-	if !xok || !yok {
-		return 0, 0, fmt.Errorf("wrong argument type")
-	}
-	return x, y, nil
+	return func(ctx context.Context, args []ref.Val) ref.Val {
+		if len(args) != len(c.args) {
+			return types.NewErr("function %s: got %d arguments, want %d", c.symbol.Name, len(args), len(c.args))
+		}
+		in := make([]reflect.Value, 0, t.NumIn())
+		if c.context {
+			in = append(in, reflect.ValueOf(ctx))
+		}
+		for i, arg := range args {
+			value := reflect.ValueOf(arg.Value())
+			target := t.In(i)
+			if c.context {
+				target = t.In(i + 1)
+			}
+			if !value.IsValid() || !value.Type().ConvertibleTo(target) {
+				return types.NewErr("function %s: argument %d has incompatible type", c.symbol.Name, i)
+			}
+			in = append(in, value.Convert(target))
+		}
+		out := f.Call(in)
+		if c.returnsError && !out[1].IsNil() {
+			return types.NewErr("%s", out[1].Interface().(error))
+		}
+		return types.DefaultTypeAdapter.NativeToValue(out[0].Interface())
+	}, nil
 }

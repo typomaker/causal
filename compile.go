@@ -282,13 +282,42 @@ func collectIdentifiers(e *exprpb.Expr, locals map[string]bool, out map[string]s
 }
 func usesFunction(code []instruction, name string) bool {
 	for _, i := range code {
-		if i.ast != nil {
-			ids := map[string]struct{}{}
-			addDeps(i.ast, ids)
-			if _, ok := ids[name]; ok {
+		if i.ast != nil && expressionUsesFunction(i.ast.Expr(), name) {
+			return true
+		}
+	}
+	return false
+}
+func expressionUsesFunction(e *exprpb.Expr, name string) bool {
+	if e == nil {
+		return false
+	}
+	switch x := e.ExprKind.(type) {
+	case *exprpb.Expr_SelectExpr:
+		return expressionUsesFunction(x.SelectExpr.Operand, name)
+	case *exprpb.Expr_CallExpr:
+		if x.CallExpr.Function == name || expressionUsesFunction(x.CallExpr.Target, name) {
+			return true
+		}
+		for _, a := range x.CallExpr.Args {
+			if expressionUsesFunction(a, name) {
 				return true
 			}
 		}
+	case *exprpb.Expr_ListExpr:
+		for _, a := range x.ListExpr.Elements {
+			if expressionUsesFunction(a, name) {
+				return true
+			}
+		}
+	case *exprpb.Expr_StructExpr:
+		for _, a := range x.StructExpr.Entries {
+			if expressionUsesFunction(a.Value, name) {
+				return true
+			}
+		}
+	case *exprpb.Expr_ComprehensionExpr:
+		return expressionUsesFunction(x.ComprehensionExpr.IterRange, name) || expressionUsesFunction(x.ComprehensionExpr.AccuInit, name) || expressionUsesFunction(x.ComprehensionExpr.LoopCondition, name) || expressionUsesFunction(x.ComprehensionExpr.LoopStep, name) || expressionUsesFunction(x.ComprehensionExpr.Result, name)
 	}
 	return false
 }
@@ -305,7 +334,7 @@ func programVersion(p Program) string {
 	sort.Strings(names)
 	for _, n := range names {
 		c := m[n]
-		fmt.Fprintf(h, "%s:%s:%v;", n, c.kind, c.args)
+		fmt.Fprintf(h, "%s:%s:%v:%s:%v;", n, c.kind, c.args, c.result, c.goType)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

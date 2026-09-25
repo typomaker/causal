@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	"causal/ast"
@@ -59,39 +60,80 @@ func (p *Program) UnmarshalJSON(data []byte) error {
 }
 
 type symbolContract struct {
-	symbol   ast.Symbol
-	kind     string
-	function bool
-	args     []string
-	result   string
-	err      error
+	symbol       ast.Symbol
+	kind         string
+	function     bool
+	args         []string
+	result       string
+	goType       reflect.Type
+	context      bool
+	returnsError bool
+	err          error
 }
 
 func contractFor[T any](name string) (symbolContract, error) {
-	var z T
-	c := symbolContract{symbol: ast.Symbol{Name: name}}
-	switch any(z).(type) {
-	case bool:
-		c.kind = "bool"
-	case string:
-		c.kind = "string"
-	case int64:
-		c.kind = "int"
-	case uint64:
-		c.kind = "uint"
-	case float64:
-		c.kind = "double"
-	case time.Duration:
-		c.kind = "duration"
-	case func(float64, float64) float64, func(context.Context, float64, float64) float64, func(float64, float64) (float64, error), func(context.Context, float64, float64) (float64, error):
-		c.function, c.args, c.result = true, []string{"double", "double"}, "double"
-	case func(int64) int64, func(context.Context, int64) int64, func(int64) (int64, error), func(context.Context, int64) (int64, error):
-		c.function, c.args, c.result = true, []string{"int"}, "int"
-	case func(int64, int64) int64, func(context.Context, int64, int64) int64, func(int64, int64) (int64, error), func(context.Context, int64, int64) (int64, error):
-		c.function, c.args, c.result = true, []string{"int", "int"}, "int"
-	default:
-		return c, fmt.Errorf("causal: Symbol %q has unsupported static type %T", name, z)
+	t := reflect.TypeFor[T]()
+	c := symbolContract{symbol: ast.Symbol{Name: name}, goType: t}
+	if t.Kind() != reflect.Func {
+		kind, ok := kindForType(t)
+		if !ok {
+			return c, fmt.Errorf("causal: Symbol %q has unsupported static type %v", name, t)
+		}
+		c.kind = kind
+	} else {
+		if t.IsVariadic() {
+			return c, fmt.Errorf("causal: function Symbol %q must not be variadic", name)
+		}
+		c.function = true
+		first := 0
+		if t.NumIn() > 0 && t.In(0) == contextType {
+			c.context = true
+			first = 1
+		}
+		for i := first; i < t.NumIn(); i++ {
+			kind, ok := kindForType(t.In(i))
+			if !ok {
+				return c, fmt.Errorf("causal: function Symbol %q argument %d has unsupported type %v", name, i-first, t.In(i))
+			}
+			c.args = append(c.args, kind)
+		}
+		if t.NumOut() != 1 && t.NumOut() != 2 {
+			return c, fmt.Errorf("causal: function Symbol %q must return R or (R, error)", name)
+		}
+		kind, ok := kindForType(t.Out(0))
+		if !ok {
+			return c, fmt.Errorf("causal: function Symbol %q result has unsupported type %v", name, t.Out(0))
+		}
+		c.result = kind
+		if t.NumOut() == 2 {
+			if t.Out(1) != errorType {
+				return c, fmt.Errorf("causal: function Symbol %q second result must be error", name)
+			}
+			c.returnsError = true
+		}
 	}
 	c.symbol.Type, c.symbol.Function, c.symbol.Arguments, c.symbol.Result = c.kind, c.function, c.args, c.result
 	return c, nil
+}
+
+var contextType = reflect.TypeFor[context.Context]()
+var errorType = reflect.TypeFor[error]()
+var durationType = reflect.TypeFor[time.Duration]()
+
+func kindForType(t reflect.Type) (string, bool) {
+	switch t {
+	case reflect.TypeFor[bool]():
+		return "bool", true
+	case reflect.TypeFor[string]():
+		return "string", true
+	case reflect.TypeFor[int64]():
+		return "int", true
+	case reflect.TypeFor[uint64]():
+		return "uint", true
+	case reflect.TypeFor[float64]():
+		return "double", true
+	case durationType:
+		return "duration", true
+	}
+	return "", false
 }

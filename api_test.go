@@ -153,3 +153,33 @@ func TestScopeJSONContinuation(t *testing.T) {
 		t.Fatalf("v=%d", v)
 	}
 }
+
+func TestArbitraryFunctionSymbolSignature(t *testing.T) {
+	value := ""
+	p := causal.New(
+		causal.Symbol[string]("value"),
+		causal.Symbol[func(context.Context, string, bool, uint64) (string, error)]("choose"),
+		causal.Case("x", causal.Self("value"), causal.With(`choose("ok", true, 2u)`)),
+	)
+	r, err := p.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scope causal.Scope
+	state := causal.Bind("value", causal.Getter(func(context.Context) string { return value }), causal.Setter(func(_ context.Context, v string) { value = v }))
+	if err := r.Do(context.Background(), &scope, "x", state); err == nil || !strings.Contains(err.Error(), "choose") {
+		t.Fatalf("missing function was not prevalidated: %v", err)
+	}
+	fn := func(_ context.Context, text string, enabled bool, count uint64) (string, error) {
+		if enabled && count == 2 {
+			return text, nil
+		}
+		return "", errors.New("bad arguments")
+	}
+	if err := r.Do(context.Background(), &scope, "x", state, causal.Bind("choose", fn)); err != nil {
+		t.Fatal(err)
+	}
+	if value != "ok" {
+		t.Fatalf("value=%q", value)
+	}
+}

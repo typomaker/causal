@@ -64,6 +64,7 @@ func TestAllFunctionAdapters(t *testing.T) {
 	if _, err := functionAdapter(c, func(float64, float64) float64 { return 0 }); err == nil {
 		t.Fatal("accepted mismatch")
 	}
+	c = Symbol[func(int64) (int64, error)]("x").(symbolDeclaration).contract
 	call, _ := functionAdapter(c, func(int64) (int64, error) { return 0, errors.New("bad") })
 	if !types.IsError(call(ctx, []ref.Val{types.Int(1)})) {
 		t.Fatal("lost error")
@@ -125,24 +126,7 @@ func TestHelperAndErrorBranches(t *testing.T) {
 		}
 		ids := map[string]struct{}{}
 		addDeps(a, ids)
-	}
-	if _, _, err := twoInt(nil); err == nil {
-		t.Fatal()
-	}
-	if _, _, err := twoInt([]ref.Val{types.String("x"), types.Int(1)}); err == nil {
-		t.Fatal()
-	}
-	if _, _, err := twoFloat(nil); err == nil {
-		t.Fatal()
-	}
-	if _, _, err := twoFloat([]ref.Val{types.String("x"), types.Double(1)}); err == nil {
-		t.Fatal()
-	}
-	if _, err := oneInt(nil); err == nil {
-		t.Fatal()
-	}
-	if _, err := oneInt([]ref.Val{types.String("x")}); err == nil {
-		t.Fatal()
+		_ = expressionUsesFunction(a.Expr(), "missing")
 	}
 	p := New(Symbol[int64]("v"), Case("x", Self("v"), With("v+1")))
 	r, _ := p.Compile()
@@ -166,6 +150,26 @@ func TestHelperAndErrorBranches(t *testing.T) {
 	s.runtimeVersion = "wrong"
 	if err := r.Do(context.Background(), &s, "x", b); err == nil {
 		t.Fatal()
+	}
+}
+
+func TestFunctionContractValidation(t *testing.T) {
+	bad := []Declaration{
+		Symbol[func(...int64) int64]("f"),
+		Symbol[func(int) int64]("f"),
+		Symbol[func()]("f"),
+		Symbol[func() (int64, string)]("f"),
+		Symbol[func() (int, error)]("f"),
+	}
+	for _, declaration := range bad {
+		if declaration.(symbolDeclaration).contract.err == nil {
+			t.Fatal("accepted invalid function contract")
+		}
+	}
+	var nilFn func() bool
+	c := Symbol[func() bool]("f").(symbolDeclaration).contract
+	if _, err := functionAdapter(c, nilFn); err == nil {
+		t.Fatal("accepted nil function")
 	}
 }
 
@@ -239,39 +243,5 @@ func TestAdditionalRuntimeBranches(t *testing.T) {
 	call, _ = functionAdapter(cf, func(float64, float64) (float64, error) { return 0, errors.New("x") })
 	if !types.IsError(call(context.Background(), []ref.Val{types.Double(1), types.Double(2)})) {
 		t.Fatal()
-	}
-	cu := Symbol[func(int64) int64]("f").(symbolDeclaration).contract
-	for _, item := range []struct {
-		c  symbolContract
-		fn any
-	}{{cu, func(int64) int64 { return 0 }}, {cu, func(context.Context, int64) int64 { return 0 }}, {ci, func(int64, int64) int64 { return 0 }}, {ci, func(context.Context, int64, int64) int64 { return 0 }}} {
-		call, e := functionAdapter(item.c, item.fn)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if !types.IsError(call(context.Background(), nil)) {
-			t.Fatal()
-		}
-	}
-	cfPlain := Symbol[func(float64, float64) float64]("f").(symbolDeclaration).contract
-	for _, fn := range []any{func(float64, float64) float64 { return 0 }, func(context.Context, float64, float64) float64 { return 0 }} {
-		call, e := functionAdapter(cfPlain, fn)
-		if e != nil || !types.IsError(call(context.Background(), nil)) {
-			t.Fatal(e)
-		}
-	}
-	for _, item := range []struct {
-		c    symbolContract
-		fn   any
-		args []ref.Val
-	}{
-		{cu, func(context.Context, int64) (int64, error) { return 0, errors.New("x") }, []ref.Val{types.Int(1)}},
-		{ci, func(context.Context, int64, int64) (int64, error) { return 0, errors.New("x") }, []ref.Val{types.Int(1), types.Int(1)}},
-		{cf, func(context.Context, float64, float64) (float64, error) { return 0, errors.New("x") }, []ref.Val{types.Double(1), types.Double(1)}},
-	} {
-		call, e := functionAdapter(item.c, item.fn)
-		if e != nil || !types.IsError(call(context.Background(), item.args)) {
-			t.Fatal(e)
-		}
 	}
 }
