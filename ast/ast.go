@@ -38,9 +38,31 @@ func (Wait) isStmt()    {}
 func (CaseRef) isStmt() {}
 
 type stmtJSON map[string]string
+type symbolJSON struct {
+	Type      string   `json:"type,omitempty"`
+	Arguments []string `json:"args,omitempty"`
+	Result    string   `json:"result,omitempty"`
+}
 
 func (p Program) MarshalJSON() ([]byte, error) {
-	out := make(map[string][]stmtJSON)
+	out := make(map[string]any)
+	if len(p.Symbols) > 0 {
+		symbols := make(map[string]symbolJSON, len(p.Symbols))
+		for _, symbol := range p.Symbols {
+			if symbol.Name == "" {
+				return nil, fmt.Errorf("causal: symbol name is empty")
+			}
+			if _, exists := symbols[symbol.Name]; exists {
+				return nil, fmt.Errorf("causal: duplicate symbol %q", symbol.Name)
+			}
+			if symbol.Function {
+				symbols[symbol.Name] = symbolJSON{Arguments: append([]string{}, symbol.Arguments...), Result: symbol.Result}
+			} else {
+				symbols[symbol.Name] = symbolJSON{Type: symbol.Type}
+			}
+		}
+		out["@symbol"] = symbols
+	}
 	seen := make(map[string]bool)
 	var add func(Case) error
 	add = func(c Case) error {
@@ -97,7 +119,31 @@ func (p *Program) UnmarshalJSON(data []byte) error {
 	}
 	sort.Strings(names)
 	cases := make([]Case, 0, len(names))
+	var symbols []Symbol
 	for _, name := range names {
+		if name == "@symbol" {
+			var declarations map[string]symbolJSON
+			if err := json.Unmarshal(encoded[name], &declarations); err != nil || declarations == nil {
+				return fmt.Errorf("causal: @symbol must be an object")
+			}
+			symbolNames := make([]string, 0, len(declarations))
+			for symbolName := range declarations {
+				symbolNames = append(symbolNames, symbolName)
+			}
+			sort.Strings(symbolNames)
+			for _, symbolName := range symbolNames {
+				if symbolName == "" {
+					return fmt.Errorf("causal: symbol name is empty")
+				}
+				declaration := declarations[symbolName]
+				function := declaration.Result != "" || declaration.Arguments != nil
+				if function == (declaration.Type != "") {
+					return fmt.Errorf("causal: symbol %q must declare either type or function signature", symbolName)
+				}
+				symbols = append(symbols, Symbol{Name: symbolName, Type: declaration.Type, Function: function, Arguments: declaration.Arguments, Result: declaration.Result})
+			}
+			continue
+		}
 		if name == "" {
 			return fmt.Errorf("causal: case name is empty")
 		}
@@ -141,6 +187,6 @@ func (p *Program) UnmarshalJSON(data []byte) error {
 		}
 		cases = append(cases, c)
 	}
-	p.Cases = cases
+	p.Symbols, p.Cases = symbols, cases
 	return nil
 }

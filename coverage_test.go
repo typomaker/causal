@@ -171,6 +171,27 @@ func TestFunctionContractValidation(t *testing.T) {
 	if _, err := functionAdapter(c, nilFn); err == nil {
 		t.Fatal("accepted nil function")
 	}
+	for _, kind := range []string{"bool", "string", "int", "uint", "double", "duration"} {
+		if !validKind(kind) {
+			t.Fatal(kind)
+		}
+	}
+	if validKind("bad") {
+		t.Fatal()
+	}
+	for _, symbol := range []ast.Symbol{{}, {Name: "x", Type: "bad"}, {Name: "f", Function: true, Arguments: []string{"bad"}, Result: "int"}, {Name: "f", Function: true, Result: "bad"}} {
+		if _, err := contractFromAST(symbol); err == nil {
+			t.Fatalf("accepted %#v", symbol)
+		}
+	}
+	tree := ast.Program{Symbols: []ast.Symbol{{Name: "v", Type: "int"}}, Cases: []ast.Case{{Name: "x"}}}
+	if len(New(tree).contracts) != 1 {
+		t.Fatal()
+	}
+	var program Program
+	if json.Unmarshal([]byte(`{"@symbol":{"x":{"type":"bad"}},"x":[]}`), &program) == nil {
+		t.Fatal()
+	}
 }
 
 func TestAdditionalRuntimeBranches(t *testing.T) {

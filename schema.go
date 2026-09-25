@@ -32,6 +32,14 @@ func New(items ...Declaration) Program {
 			p.AST.Cases = append(p.AST.Cases, x.AST.Cases...)
 			p.AST.Symbols = append(p.AST.Symbols, x.AST.Symbols...)
 			p.contracts = append(p.contracts, x.contracts...)
+		case ast.Program:
+			p.AST.Cases = append(p.AST.Cases, x.Cases...)
+			p.AST.Symbols = append(p.AST.Symbols, x.Symbols...)
+			for _, symbol := range x.Symbols {
+				contract, err := contractFromAST(symbol)
+				contract.err = err
+				p.contracts = append(p.contracts, contract)
+			}
 		}
 	}
 	return p
@@ -55,8 +63,18 @@ func (p *Program) UnmarshalJSON(data []byte) error {
 	if p == nil {
 		return fmt.Errorf("causal: cannot unmarshal into nil Program")
 	}
-	p.contracts = nil
-	return json.Unmarshal(data, &p.AST)
+	if err := json.Unmarshal(data, &p.AST); err != nil {
+		return err
+	}
+	p.contracts = make([]symbolContract, 0, len(p.AST.Symbols))
+	for _, symbol := range p.AST.Symbols {
+		contract, err := contractFromAST(symbol)
+		if err != nil {
+			return err
+		}
+		p.contracts = append(p.contracts, contract)
+	}
+	return nil
 }
 
 type symbolContract struct {
@@ -72,7 +90,10 @@ type symbolContract struct {
 }
 
 func contractFor[T any](name string) (symbolContract, error) {
-	t := reflect.TypeFor[T]()
+	return contractForType(name, reflect.TypeFor[T]())
+}
+
+func contractForType(name string, t reflect.Type) (symbolContract, error) {
 	c := symbolContract{symbol: ast.Symbol{Name: name}, goType: t}
 	if t.Kind() != reflect.Func {
 		kind, ok := kindForType(t)
@@ -114,6 +135,35 @@ func contractFor[T any](name string) (symbolContract, error) {
 	}
 	c.symbol.Type, c.symbol.Function, c.symbol.Arguments, c.symbol.Result = c.kind, c.function, c.args, c.result
 	return c, nil
+}
+
+func contractFromAST(symbol ast.Symbol) (symbolContract, error) {
+	c := symbolContract{symbol: symbol, kind: symbol.Type, function: symbol.Function, args: append([]string(nil), symbol.Arguments...), result: symbol.Result}
+	if symbol.Name == "" {
+		return c, fmt.Errorf("causal: symbol name is empty")
+	}
+	if symbol.Function {
+		for i, kind := range c.args {
+			if !validKind(kind) {
+				return c, fmt.Errorf("causal: function Symbol %q argument %d has unsupported CEL type %q", symbol.Name, i, kind)
+			}
+		}
+		if !validKind(c.result) {
+			return c, fmt.Errorf("causal: function Symbol %q result has unsupported CEL type %q", symbol.Name, c.result)
+		}
+		c.kind = ""
+	} else if !validKind(c.kind) {
+		return c, fmt.Errorf("causal: Symbol %q has unsupported CEL type %q", symbol.Name, c.kind)
+	}
+	return c, nil
+}
+
+func validKind(kind string) bool {
+	switch kind {
+	case "bool", "string", "int", "uint", "double", "duration":
+		return true
+	}
+	return false
 }
 
 var contextType = reflect.TypeFor[context.Context]()

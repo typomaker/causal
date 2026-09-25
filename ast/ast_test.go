@@ -7,7 +7,7 @@ import (
 )
 
 func TestJSONAllStatementsAndErrors(t *testing.T) {
-	p := Program{Cases: []Case{{Name: "x", Statements: []Stmt{Self{"v"}, With{"v+1"}, Skip{"false"}, Wait{`duration("1s")`}, CaseRef{"y"}, Case{Name: "z"}}}, {Name: "y"}}}
+	p := Program{Symbols: []Symbol{{Name: "v", Type: "int"}, {Name: "f", Function: true, Arguments: []string{"int"}, Result: "int"}}, Cases: []Case{{Name: "x", Statements: []Stmt{Self{"v"}, With{"v+1"}, Skip{"false"}, Wait{`duration("1s")`}, CaseRef{"y"}, Case{Name: "z"}}}, {Name: "y"}}}
 	b, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -18,6 +18,9 @@ func TestJSONAllStatementsAndErrors(t *testing.T) {
 	}
 	if len(q.Cases) != 3 {
 		t.Fatalf("cases=%d: %s", len(q.Cases), b)
+	}
+	if len(q.Symbols) != 2 || !q.Symbols[0].Function {
+		t.Fatalf("symbols=%#v", q.Symbols)
 	}
 	bad := []string{`null`, `[]`, `{"x":null}`, `{"x":{}}`, `{"x":[{}]}`, `{"x":[{"self":1}]}`, `{"x":[{"bad":"x"}]}`, `{"x":[{"self":"x","with":"x"}]}`, `{"":[]}`}
 	for _, source := range bad {
@@ -35,6 +38,17 @@ func TestJSONAllStatementsAndErrors(t *testing.T) {
 	}
 	if _, err := json.Marshal(Program{Cases: []Case{{Name: "x"}, {Name: "x"}}}); err == nil {
 		t.Fatal("accepted duplicate")
+	}
+	for _, program := range []Program{{Symbols: []Symbol{{Name: "", Type: "int"}}}, {Symbols: []Symbol{{Name: "x", Type: "int"}, {Name: "x", Type: "int"}}}} {
+		if _, err := json.Marshal(program); err == nil {
+			t.Fatal("accepted invalid symbols")
+		}
+	}
+	for _, source := range []string{`{"@symbol":null}`, `{"@symbol":[]}`, `{"@symbol":{"":{"type":"int"}}}`, `{"@symbol":{"x":{}}}`, `{"@symbol":{"x":{"type":"int","result":"int"}}}`} {
+		var program Program
+		if json.Unmarshal([]byte(source), &program) == nil {
+			t.Fatalf("accepted %s", source)
+		}
 	}
 	if !strings.Contains(string(b), `"case":"z"`) {
 		t.Fatal(string(b))

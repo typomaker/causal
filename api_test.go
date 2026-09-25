@@ -71,12 +71,12 @@ func TestFunctionSymbolsAndErrors(t *testing.T) {
 }
 
 func TestASTJSONCanonical(t *testing.T) {
-	p := causal.New(causal.Symbol[float64]("health"), causal.Case("attack", causal.Self("health"), causal.With("health-1")))
+	p := causal.New(causal.Symbol[float64]("health"), causal.Case("attack", causal.Self("health"), causal.With("health-1.0")))
 	b, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) != `{"attack":[{"self":"health"},{"with":"health-1"}]}` {
+	if string(b) != `{"@symbol":{"health":{"type":"double"}},"attack":[{"self":"health"},{"with":"health-1.0"}]}` {
 		t.Fatalf("json=%s", b)
 	}
 	var tree ast.Program
@@ -91,8 +91,40 @@ func TestASTJSONCanonical(t *testing.T) {
 	if err := json.Unmarshal(b, &root); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := root.Compile(); err == nil || !strings.Contains(err.Error(), "undeclared") {
-		t.Fatalf("symbols must be supplied outside JSON: %v", err)
+	if _, err := root.Compile(); err != nil {
+		t.Fatalf("JSON symbols did not compile: %v", err)
+	}
+}
+
+func TestCompleteProgramFromJSON(t *testing.T) {
+	source := `{"@symbol":{"value":{"type":"string"},"choose":{"args":["string","bool","uint"],"result":"string"}},"x":[{"self":"value"},{"with":"choose(\"ok\",true,2u)"}]}`
+	var program causal.Program
+	if err := json.Unmarshal([]byte(source), &program); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := program.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := ""
+	var scope causal.Scope
+	bindings := []causal.Binding{
+		causal.Bind("value", causal.Getter(func(context.Context) string { return value }), causal.Setter(func(_ context.Context, v string) { value = v })),
+		causal.Bind("choose", func(text string, enabled bool, count uint64) string {
+			if enabled && count == 2 {
+				return text
+			}
+			return ""
+		}),
+	}
+	if err := runtime.Do(context.Background(), &scope, "x", bindings[0], causal.Bind("choose", func(string) string { return "" })); err == nil {
+		t.Fatal("accepted incompatible JSON function binding")
+	}
+	if err := runtime.Do(context.Background(), &scope, "x", bindings...); err != nil {
+		t.Fatal(err)
+	}
+	if value != "ok" {
+		t.Fatalf("value=%q", value)
 	}
 }
 

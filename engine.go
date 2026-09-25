@@ -227,8 +227,19 @@ type functionCall func(context.Context, []ref.Val) ref.Val
 
 func functionAdapter(c symbolContract, fn any) (functionCall, error) {
 	t := reflect.TypeOf(fn)
-	if t == nil || t != c.goType {
+	if t == nil {
 		return nil, fmt.Errorf("function symbol %q implementation has type %v, want %v", c.symbol.Name, t, c.goType)
+	}
+	if c.goType != nil {
+		if t != c.goType {
+			return nil, fmt.Errorf("function symbol %q implementation has type %v, want %v", c.symbol.Name, t, c.goType)
+		}
+	} else {
+		actual, err := contractForType(c.symbol.Name, t)
+		if err != nil || !actual.function || actual.result != c.result || !sameKinds(actual.args, c.args) {
+			return nil, fmt.Errorf("function symbol %q implementation has incompatible CEL signature", c.symbol.Name)
+		}
+		c.context, c.returnsError = actual.context, actual.returnsError
 	}
 	f := reflect.ValueOf(fn)
 	if f.IsNil() {
@@ -259,4 +270,16 @@ func functionAdapter(c symbolContract, fn any) (functionCall, error) {
 		}
 		return types.DefaultTypeAdapter.NativeToValue(out[0].Interface())
 	}, nil
+}
+
+func sameKinds(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
