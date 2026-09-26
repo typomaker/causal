@@ -42,28 +42,27 @@ func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ..
 	if err != nil {
 		return fmt.Errorf("causal: case %q: %w", name, err)
 	}
-	scope.lock()
-	defer scopeMu.Unlock()
+	scope.mu.Lock()
+	defer scope.mu.Unlock()
+	scope.init()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	state := scope.currentState()
-	if state.runtimeVersion != "" && state.runtimeVersion != r.version {
-		return fmt.Errorf("causal: scope runtime version %q is incompatible with %q", state.runtimeVersion, r.version)
+	if scope.runtimeVersion != "" && scope.runtimeVersion != r.version {
+		return fmt.Errorf("causal: scope runtime version %q is incompatible with %q", scope.runtimeVersion, r.version)
 	}
+	scope.runtimeVersion = r.version
 	pc := 0
-	if c, ok := state.continuations[name]; ok {
+	if c, ok := scope.continuations[name]; ok {
 		if c.Version != r.version || c.RootCase != name || c.PC < 0 || c.PC >= len(cc.code) {
 			return fmt.Errorf("causal: invalid continuation for %q", name)
 		}
-		if state.clock().Before(c.AvailableAt) {
+		if scope.clock().Before(c.AvailableAt) {
 			return nil
 		}
 		pc = c.PC
 	}
-	state = scope.mutate()
-	state.runtimeVersion = r.version
-	state.ready[name] = false
+	scope.ready[name] = false
 	seg := &segment{snapshot: map[string]any{}, pending: map[string]any{}}
 	for pc < len(cc.code) {
 		if err := ctx.Err(); err != nil {
@@ -105,18 +104,18 @@ func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ..
 			if d.Duration < 0 {
 				return fmt.Errorf("causal: Wait %q returned negative duration", ins.source)
 			}
-			if e := r.commit(ctx, state, bound, seg); e != nil {
+			if e := r.commit(ctx, scope, bound, seg); e != nil {
 				return e
 			}
-			state.continuations[name] = continuation{RootCase: name, PC: pc + 1, AvailableAt: state.clock().Add(d.Duration), Version: r.version}
+			scope.continuations[name] = continuation{RootCase: name, PC: pc + 1, AvailableAt: scope.clock().Add(d.Duration), Version: r.version}
 			return nil
 		}
 		pc++
 	}
-	if err := r.commit(ctx, state, bound, seg); err != nil {
+	if err := r.commit(ctx, scope, bound, seg); err != nil {
 		return err
 	}
-	delete(state.continuations, name)
+	delete(scope.continuations, name)
 	return nil
 }
 
@@ -196,7 +195,7 @@ func (r *Runtime) eval(ctx context.Context, bound map[string]preparedBinding, se
 	}
 	return v, nil
 }
-func (r *Runtime) commit(ctx context.Context, state *scopeState, bound map[string]preparedBinding, seg *segment) error {
+func (r *Runtime) commit(ctx context.Context, s *Scope, bound map[string]preparedBinding, seg *segment) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -212,7 +211,7 @@ func (r *Runtime) commit(ctx context.Context, state *scopeState, bound map[strin
 	}
 	for _, n := range seg.order {
 		for _, c := range r.dependents[n] {
-			state.ready[c] = true
+			s.ready[c] = true
 		}
 	}
 	seg.snapshot = map[string]any{}

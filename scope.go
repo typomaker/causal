@@ -59,70 +59,31 @@ type continuation struct {
 type Clock func() time.Time
 
 // Scope contains only mutable execution state. Its zero value is ready to use.
-// Scope values are comparable. A copy is a snapshot: changing either value
-// creates new internal state and makes the values compare unequal.
 type Scope struct {
-	state    *scopeState
-	revision uint64
-}
-
-type scopeState struct {
+	mu             sync.Mutex
 	ready          map[string]bool
 	continuations  map[string]continuation
 	clock          Clock
 	runtimeVersion string
 }
 
-var scopeMu sync.Mutex
-
-func (*Scope) lock() { scopeMu.Lock() }
-
-func (s *Scope) currentState() *scopeState {
-	if s.state == nil {
-		return &scopeState{clock: Clock(time.Now)}
+func (s *Scope) init() {
+	if s.ready == nil {
+		s.ready = map[string]bool{}
 	}
-	return s.state
-}
-
-func (s *Scope) mutate() *scopeState {
-	current := s.currentState()
-	next := &scopeState{
-		ready:          cloneMap(current.ready),
-		continuations:  cloneMap(current.continuations),
-		clock:          current.clock,
-		runtimeVersion: current.runtimeVersion,
+	if s.continuations == nil {
+		s.continuations = map[string]continuation{}
 	}
-	if next.ready == nil {
-		next.ready = map[string]bool{}
+	if s.clock == nil {
+		s.clock = Clock(time.Now)
 	}
-	if next.continuations == nil {
-		next.continuations = map[string]continuation{}
-	}
-	s.state = next
-	s.revision++
-	return next
-}
-
-func cloneMap[K comparable, V any](source map[K]V) map[K]V {
-	if source == nil {
-		return nil
-	}
-	clone := make(map[K]V, len(source))
-	for key, value := range source {
-		clone[key] = value
-	}
-	return clone
 }
 
 // Clock returns the scope's current clock. A zero-value Scope returns a clock
 // backed by time.Now.
 //
 //	now := scope.Clock()()
-func (s *Scope) Clock() Clock {
-	s.lock()
-	defer scopeMu.Unlock()
-	return s.currentState().clock
-}
+func (s *Scope) Clock() Clock { s.mu.Lock(); defer s.mu.Unlock(); s.init(); return s.clock }
 
 // SetClock replaces the clock used by the scope. Passing nil restores the
 // default time.Now clock. Tests can use it to advance a Wait deterministically:
@@ -130,13 +91,13 @@ func (s *Scope) Clock() Clock {
 //	now := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 //	scope.SetClock(func() time.Time { return now })
 func (s *Scope) SetClock(c Clock) {
-	s.lock()
-	defer scopeMu.Unlock()
-	state := s.mutate()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.init()
 	if c == nil {
-		state.clock = Clock(time.Now)
+		s.clock = Clock(time.Now)
 	} else {
-		state.clock = c
+		s.clock = c
 	}
 }
 
@@ -147,9 +108,10 @@ func (s *Scope) SetClock(c Clock) {
 //		scheduler.Enqueue("attack", deadline)
 //	}
 func (s *Scope) Pending(name string) (time.Time, bool) {
-	s.lock()
-	defer scopeMu.Unlock()
-	continuation, exists := s.currentState().continuations[name]
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.init()
+	continuation, exists := s.continuations[name]
 	return continuation.AvailableAt, exists
 }
 
@@ -164,10 +126,10 @@ type scopeJSON struct {
 //
 //	data, err := json.Marshal(&scope)
 func (s *Scope) MarshalJSON() ([]byte, error) {
-	s.lock()
-	defer scopeMu.Unlock()
-	state := s.currentState()
-	return json.Marshal(scopeJSON{state.runtimeVersion, state.ready, state.continuations})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.init()
+	return json.Marshal(scopeJSON{s.runtimeVersion, s.ready, s.continuations})
 }
 
 // UnmarshalJSON restores execution metadata previously produced by MarshalJSON:
@@ -179,17 +141,11 @@ func (s *Scope) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &v); err != nil {
 		return err
 	}
-	s.lock()
-	defer scopeMu.Unlock()
-	state := s.mutate()
-	state.runtimeVersion = v.RuntimeVersion
-	state.ready = v.Readiness
-	state.continuations = v.Continuations
-	if state.ready == nil {
-		state.ready = map[string]bool{}
-	}
-	if state.continuations == nil {
-		state.continuations = map[string]continuation{}
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runtimeVersion = v.RuntimeVersion
+	s.ready = v.Readiness
+	s.continuations = v.Continuations
+	s.init()
 	return nil
 }
