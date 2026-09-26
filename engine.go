@@ -25,6 +25,11 @@ type expressionExecution struct {
 
 // Do validates all bindings required by the complete root Case, then executes
 // until completion or the next Wait.
+//
+//	err := runtime.Do(ctx, &scope, "attack",
+//		causal.Bind("health", &health),
+//		causal.Bind("damage", &damage),
+//	)
 func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ...Binding) error {
 	if scope == nil {
 		return fmt.Errorf("causal: nil scope")

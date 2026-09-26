@@ -45,7 +45,13 @@ type compiledCase struct {
 	requirements map[string]struct{}
 }
 
-// Runtime is an immutable compiled program and is safe for concurrent use.
+// Runtime is an immutable compiled program and is safe for concurrent use. Use
+// [Program.Compile] to create one, then execute named root cases with [Runtime.Do].
+//
+//	runtime, err := program.Compile()
+//	if err == nil {
+//		err = runtime.Do(ctx, &scope, "attack", bindings...)
+//	}
 type Runtime struct {
 	cases      map[string]*compiledCase
 	contracts  map[string]symbolContract

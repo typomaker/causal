@@ -9,10 +9,15 @@ import (
 	"strings"
 )
 
+// Program is the canonical serializable representation of a causal program.
+// It can be decoded directly from the JSON format used by package causal.
 type Program struct {
 	Symbols []Symbol `json:"-"`
 	Cases   []Case   `json:"-"`
 }
+
+// Symbol describes either a CEL value or function declaration. For example,
+// Symbol{Name: "health", Type: "int"} declares an integer value.
 type Symbol struct {
 	Name      string   `json:"name"`
 	Type      string   `json:"type"`
@@ -20,15 +25,36 @@ type Symbol struct {
 	Arguments []string `json:"arguments,omitempty"`
 	Result    string   `json:"result,omitempty"`
 }
+
+// Stmt is a statement that can appear in a Case. Concrete statements include
+// Self, With, Skip, Wait, CaseRef, and nested Case values.
 type Stmt interface{ isStmt() }
+
+// Case is a named statement block. For example, Case{Name: "heal",
+// Statements: []Stmt{Self{Symbol: "health"}, With{Expression: "health + 10"}}}.
 type Case struct {
 	Name       string
 	Statements []Stmt
 }
+
+// Self selects the symbol assigned by subsequent With statements; for example,
+// Self{Symbol: "health"}.
 type Self struct{ Symbol string }
+
+// With stages the result of a CEL expression; for example,
+// With{Expression: "health + 10"}.
 type With struct{ Expression string }
+
+// Skip exits the current case when its CEL expression is true; for example,
+// Skip{Expression: "energy < 5"}.
 type Skip struct{ Expression string }
+
+// Wait commits staged writes and suspends execution for a CEL duration; for
+// example, Wait{Expression: `duration("3s")`}.
 type Wait struct{ Expression string }
+
+// CaseRef includes a named case decoded from JSON; for example,
+// CaseRef{Name: "heal"}.
 type CaseRef struct{ Name string }
 
 func (Case) isStmt()    {}
@@ -40,6 +66,8 @@ func (CaseRef) isStmt() {}
 
 type stmtJSON map[string]string
 
+// MarshalJSON encodes the canonical object form. For example, json.Marshal(p)
+// emits symbol declarations under "@symbol" and cases under their names.
 func (p Program) MarshalJSON() ([]byte, error) {
 	out := make(map[string]any)
 	if len(p.Symbols) > 0 {
@@ -101,6 +129,11 @@ func (p Program) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(out)
 }
+
+// UnmarshalJSON decodes the canonical object form. For example:
+//
+//	var p ast.Program
+//	err := json.Unmarshal([]byte(`{"@symbol":{"health":"int"},"heal":[]}`), &p)
 func (p *Program) UnmarshalJSON(data []byte) error {
 	if p == nil {
 		return fmt.Errorf("causal: cannot unmarshal into nil ast.Program")

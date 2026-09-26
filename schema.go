@@ -10,15 +10,30 @@ import (
 	"causal/ast"
 )
 
+// Program contains symbol declarations and cases before compilation. Programs
+// created in Go and decoded from JSON can be combined with [New].
 type Program struct {
 	AST       ast.Program
 	contracts []symbolContract
 }
+
+// Declaration is an item accepted by [New], such as a Symbol, Case, or Program.
 type Declaration interface{}
+
+// Statement is an operation accepted by [Case].
 type Statement = ast.Stmt
+
+// Block is a named Case that can be nested in another Case.
 type Block = ast.Case
 type symbolDeclaration struct{ contract symbolContract }
 
+// New builds a program from symbol declarations, cases, and other programs.
+// For example:
+//
+//	program := causal.New(
+//		causal.Symbol[int64]("health"),
+//		causal.Case("heal", causal.Self("health"), causal.With("health + 10")),
+//	)
 func New(items ...Declaration) Program {
 	p := Program{}
 	for _, item := range items {
@@ -45,20 +60,60 @@ func New(items ...Declaration) Program {
 	return p
 }
 
+// Symbol declares a value or function available to CEL expressions. Supported
+// value types include bool, string, int64, uint64, float64, and time.Duration:
+//
+//	health := causal.Symbol[int64]("health")
+//	lookup := causal.Symbol[func(context.Context, string) (int64, error)]("lookup")
 func Symbol[T any](name string) Declaration {
 	c, err := contractFor[T](name)
 	c.err = err
 	return symbolDeclaration{c}
 }
+
+// Case declares a named sequence of statements. Cases may be nested to reuse a
+// conditional subflow:
+//
+//	heal := causal.Case("heal", causal.Self("health"), causal.With("health + 10"))
 func Case(name string, statements ...Statement) Block {
 	return ast.Case{Name: name, Statements: statements}
 }
-func Self(name string) Statement               { return ast.Self{Symbol: name} }
-func With(expr string) Statement               { return ast.With{Expression: expr} }
-func Skip(expr string) Statement               { return ast.Skip{Expression: expr} }
-func Wait(expr string) Statement               { return ast.Wait{Expression: expr} }
-func (p Program) Compile() (*Runtime, error)   { return compile(p) }
+
+// Self selects the value symbol assigned by subsequent With statements:
+//
+//	causal.Self("health")
+func Self(name string) Statement { return ast.Self{Symbol: name} }
+
+// With evaluates a CEL expression and stages its result for the current Self:
+//
+//	causal.With("max(0, health - damage)")
+func With(expr string) Statement { return ast.With{Expression: expr} }
+
+// Skip exits the current Case when its CEL expression evaluates to true:
+//
+//	causal.Skip("energy < 5")
+func Skip(expr string) Statement { return ast.Skip{Expression: expr} }
+
+// Wait commits staged values and suspends the root Case for a CEL duration:
+//
+//	causal.Wait(`duration("3s")`)
+func Wait(expr string) Statement { return ast.Wait{Expression: expr} }
+
+// Compile validates the program and creates an immutable Runtime:
+//
+//	runtime, err := program.Compile()
+func (p Program) Compile() (*Runtime, error) { return compile(p) }
+
+// MarshalJSON encodes the program's canonical AST representation:
+//
+//	data, err := json.Marshal(program)
 func (p Program) MarshalJSON() ([]byte, error) { return json.Marshal(p.AST) }
+
+// UnmarshalJSON decodes a canonical JSON program so it can be compiled or
+// combined with Go declarations:
+//
+//	var program causal.Program
+//	err := json.Unmarshal(data, &program)
 func (p *Program) UnmarshalJSON(data []byte) error {
 	if p == nil {
 		return fmt.Errorf("causal: cannot unmarshal into nil Program")
