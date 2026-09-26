@@ -12,6 +12,49 @@ import (
 	"causal/ast"
 )
 
+var _ = map[causal.Scope]struct{}{}
+
+func TestScopeComparableSnapshots(t *testing.T) {
+	now := time.Unix(10, 0)
+	var scope causal.Scope
+	unchanged := scope
+	_ = scope.Clock()
+	if _, pending := scope.Pending("run"); pending {
+		t.Fatal("zero scope has a pending continuation")
+	}
+	if scope != unchanged {
+		t.Fatal("reading a scope changed its revision")
+	}
+
+	scope.SetClock(func() time.Time { return now })
+	if scope == unchanged {
+		t.Fatal("SetClock did not change the scope revision")
+	}
+
+	value := int64(0)
+	runtime, err := causal.New(
+		causal.Symbol[int64]("value"),
+		causal.Case("run", causal.Self("value"), causal.With("value + 1"), causal.Wait(`duration("1s")`)),
+	).Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeRun := scope
+	if err := runtime.Do(context.Background(), &scope, "run", causal.Bind("value", &value)); err != nil {
+		t.Fatal(err)
+	}
+	if scope == beforeRun {
+		t.Fatal("execution did not change the scope revision")
+	}
+	if _, pending := beforeRun.Pending("run"); pending {
+		t.Fatal("an older scope snapshot observed a new continuation")
+	}
+	if _, pending := scope.Pending("run"); !pending {
+		t.Fatal("new scope snapshot has no continuation")
+	}
+}
+
 func TestNewAPIExecutionWaitAndFullBindingContract(t *testing.T) {
 	now := time.Unix(10, 0)
 	health, damage := float64(10), float64(3)

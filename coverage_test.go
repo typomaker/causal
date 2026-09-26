@@ -186,7 +186,7 @@ func TestHelperAndErrorBranches(t *testing.T) {
 	}
 	_ = s.Clock()
 	s.SetClock(nil)
-	s.runtimeVersion = "wrong"
+	s.state = &scopeState{runtimeVersion: "wrong", clock: Clock(time.Now)}
 	if err := r.Do(context.Background(), &s, "x", b); err == nil {
 		t.Fatal()
 	}
@@ -276,12 +276,11 @@ func TestAdditionalRuntimeBranches(t *testing.T) {
 	v := int64(0)
 	b := Bind("v", &v)
 	var s Scope
-	s.runtimeVersion = r.version
-	s.continuations = map[string]continuation{"x": {RootCase: "bad", PC: 0, Version: r.version}}
+	s.state = &scopeState{runtimeVersion: r.version, continuations: map[string]continuation{"x": {RootCase: "bad", PC: 0, Version: r.version}}, clock: Clock(time.Now)}
 	if err := r.Do(context.Background(), &s, "x", b); err == nil {
 		t.Fatal()
 	}
-	s.continuations = map[string]continuation{}
+	s.state = &scopeState{runtimeVersion: r.version, continuations: map[string]continuation{}, clock: Clock(time.Now)}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if !errors.Is(r.Do(ctx, &s, "x", b), context.Canceled) {

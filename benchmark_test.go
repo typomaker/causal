@@ -91,7 +91,7 @@ func benchmarkWait(b *testing.B, ctx context.Context, resume bool) {
 			if err := runtime.Do(ctx, &seed, "run", binding); err != nil {
 				b.Fatal(err)
 			}
-			continuationSeed = seed.continuations["run"]
+			continuationSeed = seed.state.continuations["run"]
 			now = now.Add(time.Second)
 		}
 		b.ReportAllocs()
@@ -99,7 +99,7 @@ func benchmarkWait(b *testing.B, ctx context.Context, resume bool) {
 		for i := 0; i < b.N; i++ {
 			var scope Scope
 			if resume {
-				scope = Scope{continuations: map[string]continuation{"run": continuationSeed}, clock: func() time.Time { return now }, runtimeVersion: runtime.version}
+				scope = Scope{state: &scopeState{continuations: map[string]continuation{"run": continuationSeed}, clock: func() time.Time { return now }, runtimeVersion: runtime.version}}
 			} else {
 				scope.SetClock(func() time.Time { return now })
 			}
