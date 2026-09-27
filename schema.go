@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"causal/ast"
@@ -61,7 +62,8 @@ func New(items ...Declaration) Program {
 }
 
 // Symbol declares a value or function available to CEL expressions. Supported
-// value types include bool, string, int64, uint64, float64, and time.Duration:
+// value types include bool, string, int64, uint64, float64, time.Duration, and
+// slices or arrays of supported value types:
 //
 //	health := causal.Symbol[int64]("health")
 //	lookup := causal.Symbol[func(context.Context, string) (int64, error)]("lookup")
@@ -220,7 +222,20 @@ func validKind(kind string) bool {
 	case "bool", "string", "int", "uint", "double", "duration":
 		return true
 	}
-	return false
+	_, ok := listElementKind(kind)
+	return ok
+}
+
+func listElementKind(kind string) (string, bool) {
+	const prefix = "list<"
+	if !strings.HasPrefix(kind, prefix) || !strings.HasSuffix(kind, ">") {
+		return "", false
+	}
+	element := kind[len(prefix) : len(kind)-1]
+	if !validKind(element) {
+		return "", false
+	}
+	return element, true
 }
 
 var contextType = reflect.TypeFor[context.Context]()
@@ -241,6 +256,12 @@ func kindForType(t reflect.Type) (string, bool) {
 		return "double", true
 	case durationType:
 		return "duration", true
+	}
+	if t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		element, ok := kindForType(t.Elem())
+		if ok {
+			return "list<" + element + ">", true
+		}
 	}
 	return "", false
 }

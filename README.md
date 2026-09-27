@@ -65,6 +65,21 @@ Only symbols required by the selected root case need bindings. A written symbol
 and a read-only symbol both use a non-nil pointer of the declared type. The
 program determines whether the value is written.
 
+Slices and fixed-size arrays of supported types are exposed as CEL lists. They
+can be read, transformed, and assigned like scalar symbols:
+
+```go
+program := causal.New(
+    causal.Symbol[[]int64]("scores"),
+    causal.Case("bonus",
+        causal.Self("scores"),
+        causal.With("scores.map(score, score + 10)"),
+    ),
+)
+```
+
+Nested slices and arrays are supported as well.
+
 ## Updating several variables
 
 Several `Self`/`With` pairs form one staged segment. If expression evaluation or
@@ -238,6 +253,10 @@ causal.Bind("damage", &attack.Damage)
 causal.Bind("calculate_damage", calculateDamage)
 ```
 
+List values may also be passed to and returned from functions. For example,
+`Symbol[func([]string) []string]("normalize")` declares a CEL function with the
+signature `(list<string>)list<string>`.
+
 ## Scope persistence
 
 `Scope` serializes its runtime version, readiness, and continuations, but never
@@ -266,7 +285,8 @@ and `causal.Program` support `encoding/json`.
 
 The optional global `@symbol` object makes a JSON program independently
 compilable. Value symbols use CEL type names: `bool`, `string`, `int`, `uint`,
-`double`, and `duration`. JSON without `@symbol` can be composed with Go symbol
+`double`, and `duration`. Lists use `list<T>`, including nested forms such as
+`list<list<int>>`. JSON without `@symbol` can be composed with Go symbol
 declarations through `causal.New`.
 
 Compiled CEL, Go implementations, bindings, and continuations are never included

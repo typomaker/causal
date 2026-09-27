@@ -431,3 +431,126 @@ func TestArbitraryFunctionSymbolSignature(t *testing.T) {
 		t.Fatalf("value=%q", value)
 	}
 }
+
+func TestListSymbolsForValuesAndFunctions(t *testing.T) {
+	t.Run("slice value", func(t *testing.T) {
+		values := []int64{1, 2}
+		program := causal.New(
+			causal.Symbol[[]int64]("values"),
+			causal.Case("append", causal.Self("values"), causal.With("values + [3]")),
+		)
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scope causal.Scope
+		if err := runtime.Do(context.Background(), &scope, "append", causal.Bind("values", &values)); err != nil {
+			t.Fatal(err)
+		}
+		if got := values; len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+			t.Fatalf("values=%v", got)
+		}
+	})
+
+	t.Run("function argument and result", func(t *testing.T) {
+		values := []string{"a"}
+		program := causal.New(
+			causal.Symbol[[]string]("values"),
+			causal.Symbol[func(context.Context, []string) ([]string, error)]("extend"),
+			causal.Case("run", causal.Self("values"), causal.With("extend(values + ['b'])")),
+		)
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scope causal.Scope
+		err = runtime.Do(context.Background(), &scope, "run",
+			causal.Bind("values", &values),
+			causal.Bind("extend", func(_ context.Context, input []string) ([]string, error) {
+				return append(input, "c"), nil
+			}),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(values, "") != "abc" {
+			t.Fatalf("values=%v", values)
+		}
+	})
+
+	t.Run("fixed and nested arrays", func(t *testing.T) {
+		values := [2][2]int64{{1, 2}, {3, 4}}
+		program := causal.New(
+			causal.Symbol[[2][2]int64]("values"),
+			causal.Symbol[func([2][2]int64) [2][2]int64]("identity"),
+			causal.Case("run", causal.Self("values"), causal.With("identity([[5, 6], [7, 8]])")),
+		)
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scope causal.Scope
+		if err := runtime.Do(context.Background(), &scope, "run", causal.Bind("values", &values), causal.Bind("identity", func(input [2][2]int64) [2][2]int64 { return input })); err != nil {
+			t.Fatal(err)
+		}
+		if values != [2][2]int64{{5, 6}, {7, 8}} {
+			t.Fatalf("values=%v", values)
+		}
+
+		invalid := causal.New(
+			causal.Symbol[[2]int64]("values"),
+			causal.Case("run", causal.Self("values"), causal.With("[1]")),
+		)
+		invalidRuntime, err := invalid.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		shortTarget := [2]int64{9, 9}
+		var invalidScope causal.Scope
+		if err := invalidRuntime.Do(context.Background(), &invalidScope, "run", causal.Bind("values", &shortTarget)); err == nil {
+			t.Fatal("assigned a CEL list with the wrong length to an array")
+		}
+		if shortTarget != [2]int64{9, 9} {
+			t.Fatalf("failed assignment changed values to %v", shortTarget)
+		}
+	})
+}
+
+func TestListSymbolsFromJSON(t *testing.T) {
+	const source = `{"@symbol":{"values":"list<int>","reverse":"(list<int>)list<int>"},"run":[{"self":"values"},{"with":"reverse(values)"}]}`
+	var program causal.Program
+	if err := json.Unmarshal([]byte(source), &program); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := program.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := []int64{1, 2, 3}
+	var scope causal.Scope
+	err = runtime.Do(context.Background(), &scope, "run", causal.Bind("values", &values), causal.Bind("reverse", func(input []int64) []int64 {
+		return []int64{input[2], input[1], input[0]}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values[0] != 3 || values[2] != 1 {
+		t.Fatalf("values=%v", values)
+	}
+	encoded, err := json.Marshal(program)
+	var canonical ast.Program
+	if err == nil {
+		err = json.Unmarshal(encoded, &canonical)
+	}
+	if err != nil || len(canonical.Symbols) != 2 || canonical.Symbols[1].Name != "values" || canonical.Symbols[1].Type != "list<int>" {
+		t.Fatalf("encoded=%s err=%v", encoded, err)
+	}
+
+	for _, signature := range []string{"list<>", "list<int", "list<bytes>", "list<int>extra"} {
+		var invalid causal.Program
+		source := `{"@symbol":{"values":"` + signature + `"},"run":[]}`
+		if err := json.Unmarshal([]byte(source), &invalid); err == nil {
+			t.Fatalf("accepted %q", signature)
+		}
+	}
+}

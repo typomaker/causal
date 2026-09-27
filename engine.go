@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
+	"github.com/google/cel-go/common/types/traits"
 	"reflect"
 )
 
@@ -201,13 +202,14 @@ func (r *Runtime) commit(ctx context.Context, s *Scope, bound map[string]prepare
 	}
 	for _, n := range seg.order {
 		v := seg.pending[n].(ref.Val)
-		native := reflect.ValueOf(v.Value())
-		if !native.IsValid() || !native.Type().AssignableTo(bound[n].valueType) {
+		native, err := nativeValue(v, bound[n].valueType)
+		if err != nil {
 			return fmt.Errorf("causal: symbol %q: cannot assign CEL %s to %v Symbol", n, v.Type(), bound[n].valueType)
 		}
+		seg.pending[n] = native
 	}
 	for _, n := range seg.order {
-		bound[n].value.Elem().Set(reflect.ValueOf(seg.pending[n].(ref.Val).Value()))
+		bound[n].value.Elem().Set(reflect.ValueOf(seg.pending[n]))
 	}
 	for _, n := range seg.order {
 		for _, c := range r.dependents[n] {
@@ -251,12 +253,12 @@ func functionAdapter(c symbolContract, fn any) (functionCall, error) {
 			in = append(in, reflect.ValueOf(ctx))
 		}
 		for i, arg := range args {
-			value := reflect.ValueOf(arg.Value())
 			target := c.nativeArgs[i]
-			if !value.IsValid() || !value.Type().ConvertibleTo(target) {
+			value, err := nativeValue(arg, target)
+			if err != nil {
 				return types.NewErr("function %s: argument %d has incompatible type", c.symbol.Name, i)
 			}
-			in = append(in, value.Convert(target))
+			in = append(in, reflect.ValueOf(value))
 		}
 		out := f.Call(in)
 		if c.returnsError && !out[1].IsNil() {
@@ -264,6 +266,25 @@ func functionAdapter(c symbolContract, fn any) (functionCall, error) {
 		}
 		return types.DefaultTypeAdapter.NativeToValue(out[0].Interface())
 	}, nil
+}
+
+func nativeValue(value ref.Val, target reflect.Type) (any, error) {
+	if target.Kind() != reflect.Array {
+		return value.ConvertToNative(target)
+	}
+	list, ok := value.(traits.Lister)
+	if !ok || int(list.Size().(types.Int)) != target.Len() {
+		return nil, fmt.Errorf("list length does not match %v", target)
+	}
+	result := reflect.New(target).Elem()
+	for i := 0; i < target.Len(); i++ {
+		element, err := nativeValue(list.Get(types.Int(i)), target.Elem())
+		if err != nil {
+			return nil, err
+		}
+		result.Index(i).Set(reflect.ValueOf(element))
+	}
+	return result.Interface(), nil
 }
 
 func sameKinds(a, b []string) bool {

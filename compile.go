@@ -237,6 +237,9 @@ func sortedContracts(m map[string]symbolContract) []string {
 	return r
 }
 func celType(k string) *cel.Type {
+	if element, ok := listElementKind(k); ok {
+		return cel.ListType(celType(element))
+	}
 	switch k {
 	case "bool":
 		return cel.BoolType
