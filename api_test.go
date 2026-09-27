@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -583,5 +584,59 @@ func TestPreparedExecution(t *testing.T) {
 	}
 	if _, err := runtime.Prepare("run", causal.Bind("value", &value)); err == nil {
 		t.Fatal("prepared an execution with a missing function binding")
+	}
+}
+
+func TestPreparedExecutionConcurrentReuse(t *testing.T) {
+	value := int64(1)
+	runtime, err := causal.New(
+		causal.Symbol[int64]("value"),
+		causal.Case("read", causal.Skip("value < 0")),
+	).Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := runtime.Prepare("read", causal.Bind("value", &value))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wait sync.WaitGroup
+	errors := make(chan error, 32)
+	for range 32 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			var scope causal.Scope
+			for range 50 {
+				if err := execution.Do(context.Background(), &scope); err != nil {
+					errors <- err
+					return
+				}
+			}
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		t.Fatal(err)
+	}
+}
+
+func TestNamedScalarSymbol(t *testing.T) {
+	type score int64
+	value := score(1)
+	runtime, err := causal.New(
+		causal.Symbol[score]("value"),
+		causal.Case("run", causal.Self("value"), causal.With("value + 1")),
+	).Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scope causal.Scope
+	if err := runtime.Do(context.Background(), &scope, "run", causal.Bind("value", &value)); err != nil {
+		t.Fatal(err)
+	}
+	if value != 2 {
+		t.Fatalf("value=%d", value)
 	}
 }

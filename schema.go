@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"causal/ast"
+	"github.com/google/cel-go/common/types/ref"
 )
 
 // Program contains symbol declarations and cases before compilation. Programs
@@ -144,6 +145,7 @@ type symbolContract struct {
 	context      bool
 	returnsError bool
 	nativeArgs   []reflect.Type
+	toNative     func(ref.Val) (any, error)
 	err          error
 }
 
@@ -159,6 +161,7 @@ func contractForType(name string, t reflect.Type) (symbolContract, error) {
 			return c, fmt.Errorf("causal: Symbol %q has unsupported static type %v", name, t)
 		}
 		c.kind = kind
+		c.toNative = nativeConverter(t)
 	} else {
 		if t.IsVariadic() {
 			return c, fmt.Errorf("causal: function Symbol %q must not be variadic", name)
@@ -256,6 +259,18 @@ func kindForType(t reflect.Type) (string, bool) {
 		return "double", true
 	case durationType:
 		return "duration", true
+	}
+	switch t.Kind() {
+	case reflect.Bool:
+		return "bool", true
+	case reflect.String:
+		return "string", true
+	case reflect.Int64:
+		return "int", true
+	case reflect.Uint64:
+		return "uint", true
+	case reflect.Float64:
+		return "double", true
 	}
 	if t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
 		element, ok := kindForType(t.Elem())

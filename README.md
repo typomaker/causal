@@ -271,7 +271,7 @@ causal.Bind("damage", &attack.Damage)
 causal.Bind("calculate_damage", calculateDamage)
 ```
 
-For frequently called functions with zero to three arguments, typed binders
+For frequently called functions with zero to eight arguments, typed binders
 avoid reflection during invocation:
 
 ```go
@@ -283,6 +283,9 @@ causal.BindFunc2("combine", combine)
 Each arity has plain, error-returning, context-aware, and context-plus-error
 variants. The general `Bind` API continues to support arbitrary function
 signatures and uses reflection only for the actual Go function call.
+
+The repetitive typed-binder API is generated from `internal/bindgen`. Run
+`go generate ./...` after changing its shape or supported arity range.
 
 List values may also be passed to and returned from functions. For example,
 `Symbol[func([]string) []string]("normalize")` declares a CEL function with the

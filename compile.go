@@ -2,6 +2,7 @@ package causal
 
 import (
 	"causal/ast"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
 	"sort"
 	"strings"
+	"sync"
 )
 
 type instructionKind uint8
@@ -60,6 +62,8 @@ type Runtime struct {
 	symbols       []symbolContract
 	symbolIndexes map[string]int
 	dependents    [][]string
+	maxTargets    int
+	segmentPool   sync.Pool
 	version       string
 }
 
@@ -168,7 +172,19 @@ func compile(program Program) (*Runtime, error) {
 				}
 			}
 		}
+		targets := make(map[int]struct{})
+		for _, ins := range cc.code {
+			if ins.kind == instWith {
+				targets[ins.targetIndex] = struct{}{}
+			}
+		}
+		if len(targets) > r.maxTargets {
+			r.maxTargets = len(targets)
+		}
 		r.cases[def.Name] = cc
+	}
+	r.segmentPool.New = func() any {
+		return &segment{values: make([]segmentValue, len(r.symbols)), order: make([]int, 0, r.maxTargets)}
 	}
 	return r, nil
 }
@@ -406,8 +422,12 @@ func (c *dynamicFunctionCall) Eval(activation interpreter.Activation) ref.Val {
 	if !ok {
 		return types.NewErr("causal: invalid function activation")
 	}
-	if c.index < 0 || c.index >= len(execution.bindings) || !execution.bindings[c.index].set || execution.bindings[c.index].call == nil {
+	if c.index < 0 || c.index >= len(execution.bindings) || !execution.bindings[c.index].set || execution.bindings[c.index].function == nil {
 		return types.NewErr("causal: missing function %s", c.name)
+	}
+	function := execution.bindings[c.index].function
+	if function.typedArity >= 0 {
+		return c.evalTyped(execution.context, function, activation)
 	}
 	args := make([]ref.Val, len(c.args))
 	for i, arg := range c.args {
@@ -416,7 +436,42 @@ func (c *dynamicFunctionCall) Eval(activation interpreter.Activation) ref.Val {
 			return args[i]
 		}
 	}
-	return execution.bindings[c.index].call(execution.context, args)
+	return function.call(execution.context, args)
+}
+
+func (c *dynamicFunctionCall) evalTyped(ctx context.Context, function *boundFunction, activation interpreter.Activation) ref.Val {
+	if len(c.args) != function.typedArity || len(c.args) > 8 {
+		return types.NewErr("function %s: got %d arguments, want %d", c.name, len(c.args), function.typedArity)
+	}
+	var args [8]ref.Val
+	for i, arg := range c.args {
+		args[i] = arg.Eval(activation)
+		if types.IsUnknownOrError(args[i]) {
+			return args[i]
+		}
+	}
+	switch function.typedArity {
+	case 0:
+		return function.call0(ctx)
+	case 1:
+		return function.call1(ctx, args[0])
+	case 2:
+		return function.call2(ctx, args[0], args[1])
+	case 3:
+		return function.call3(ctx, args[0], args[1], args[2])
+	case 4:
+		return function.call4(ctx, args[0], args[1], args[2], args[3])
+	case 5:
+		return function.call5(ctx, args[0], args[1], args[2], args[3], args[4])
+	case 6:
+		return function.call6(ctx, args[0], args[1], args[2], args[3], args[4], args[5])
+	case 7:
+		return function.call7(ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+	case 8:
+		return function.call8(ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+	default:
+		return types.NewErr("function %s: unsupported typed arity %d", c.name, function.typedArity)
+	}
 }
 func sameSymbolSignature(a, b symbolContract) bool {
 	if a.function != b.function {

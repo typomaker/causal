@@ -26,8 +26,9 @@ type segmentValue struct {
 
 type preparedBinding struct {
 	Binding
-	call functionCall
-	set  bool
+	function *boundFunction
+	toNative func(ref.Val) (any, error)
+	set      bool
 }
 
 type expressionActivation struct {
@@ -107,8 +108,9 @@ func (e *Execution) Do(ctx context.Context, scope *Scope) error {
 		pc = c.PC
 	}
 	scope.ready[name] = false
-	seg := &segment{values: make([]segmentValue, len(r.symbols))}
+	seg := r.segmentPool.Get().(*segment)
 	seg.activation = expressionActivation{runtime: r, bindings: bound, segment: seg}
+	defer r.releaseSegment(seg)
 	for pc < len(cc.code) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -190,7 +192,7 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) ([]prepare
 			if err := validateFunctionBinding(c, b.function.contract); err != nil {
 				return nil, err
 			}
-			prepared[index] = preparedBinding{Binding: b, call: b.function.call, set: true}
+			prepared[index] = preparedBinding{Binding: b, function: b.function, set: true}
 		} else {
 			if !b.value.IsValid() || b.function != nil {
 				return nil, fmt.Errorf("value symbol %q binding must be a non-nil pointer", b.name)
@@ -199,7 +201,11 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) ([]prepare
 			if !supported || kind != c.kind || c.goType != nil && b.valueType != c.goType {
 				return nil, fmt.Errorf("symbol %q binding type %v does not match %s", b.name, b.valueType, c.kind)
 			}
-			prepared[index] = preparedBinding{Binding: b, set: true}
+			converter := c.toNative
+			if converter == nil {
+				converter = nativeConverter(b.valueType)
+			}
+			prepared[index] = preparedBinding{Binding: b, toNative: converter, set: true}
 		}
 	}
 	for _, index := range cc.requirementIndexes {
@@ -254,7 +260,7 @@ func (r *Runtime) commit(ctx context.Context, s *Scope, bound []preparedBinding,
 	}
 	for _, index := range seg.order {
 		entry := &seg.values[index]
-		native, err := nativeValue(entry.pending, bound[index].valueType)
+		native, err := bound[index].toNative(entry.pending)
 		if err != nil {
 			return fmt.Errorf("causal: symbol %q: cannot assign CEL %s to %v Symbol", r.symbols[index].symbol.Name, entry.pending.Type(), bound[index].valueType)
 		}
@@ -268,16 +274,45 @@ func (r *Runtime) commit(ctx context.Context, s *Scope, bound []preparedBinding,
 			s.ready[c] = true
 		}
 	}
-	clear(seg.values)
-	seg.order = seg.order[:0]
+	resetSegment(seg)
 	return nil
 }
 
+func (r *Runtime) releaseSegment(seg *segment) {
+	resetSegment(seg)
+	seg.activation = expressionActivation{}
+	r.segmentPool.Put(seg)
+}
+
+func resetSegment(seg *segment) {
+	clear(seg.values)
+	seg.order = seg.order[:0]
+}
+
 type functionCall func(context.Context, []ref.Val) ref.Val
+type functionCall0 func(context.Context) ref.Val
+type functionCall1 func(context.Context, ref.Val) ref.Val
+type functionCall2 func(context.Context, ref.Val, ref.Val) ref.Val
+type functionCall3 func(context.Context, ref.Val, ref.Val, ref.Val) ref.Val
+type functionCall4 func(context.Context, ref.Val, ref.Val, ref.Val, ref.Val) ref.Val
+type functionCall5 func(context.Context, ref.Val, ref.Val, ref.Val, ref.Val, ref.Val) ref.Val
+type functionCall6 func(context.Context, ref.Val, ref.Val, ref.Val, ref.Val, ref.Val, ref.Val) ref.Val
+type functionCall7 func(context.Context, ref.Val, ref.Val, ref.Val, ref.Val, ref.Val, ref.Val, ref.Val) ref.Val
+type functionCall8 func(context.Context, ref.Val, ref.Val, ref.Val, ref.Val, ref.Val, ref.Val, ref.Val, ref.Val) ref.Val
 
 type boundFunction struct {
-	contract symbolContract
-	call     functionCall
+	contract   symbolContract
+	call       functionCall
+	call0      functionCall0
+	call1      functionCall1
+	call2      functionCall2
+	call3      functionCall3
+	call4      functionCall4
+	call5      functionCall5
+	call6      functionCall6
+	call7      functionCall7
+	call8      functionCall8
+	typedArity int
 }
 
 func prepareFunction(name string, fn any) (*boundFunction, error) {
@@ -315,7 +350,7 @@ func prepareFunction(name string, fn any) (*boundFunction, error) {
 		}
 		return types.DefaultTypeAdapter.NativeToValue(out[0].Interface())
 	}
-	return &boundFunction{contract: c, call: call}, nil
+	return &boundFunction{contract: c, call: call, typedArity: -1}, nil
 }
 
 func validateFunctionBinding(expected, actual symbolContract) error {
@@ -343,6 +378,32 @@ func functionAdapter(c symbolContract, fn any) (functionCall, error) {
 }
 
 func nativeValue(value ref.Val, target reflect.Type) (any, error) {
+	switch target {
+	case reflect.TypeFor[bool]():
+		if v, ok := value.(types.Bool); ok {
+			return bool(v), nil
+		}
+	case reflect.TypeFor[string]():
+		if v, ok := value.(types.String); ok {
+			return string(v), nil
+		}
+	case reflect.TypeFor[int64]():
+		if v, ok := value.(types.Int); ok {
+			return int64(v), nil
+		}
+	case reflect.TypeFor[uint64]():
+		if v, ok := value.(types.Uint); ok {
+			return uint64(v), nil
+		}
+	case reflect.TypeFor[float64]():
+		if v, ok := value.(types.Double); ok {
+			return float64(v), nil
+		}
+	case durationType:
+		if v, ok := value.(types.Duration); ok {
+			return v.Duration, nil
+		}
+	}
 	if target.Kind() != reflect.Array {
 		return value.ConvertToNative(target)
 	}
@@ -359,6 +420,10 @@ func nativeValue(value ref.Val, target reflect.Type) (any, error) {
 		result.Index(i).Set(reflect.ValueOf(element))
 	}
 	return result.Interface(), nil
+}
+
+func nativeConverter(target reflect.Type) func(ref.Val) (any, error) {
+	return func(value ref.Val) (any, error) { return nativeValue(value, target) }
 }
 
 func sameKinds(a, b []string) bool {

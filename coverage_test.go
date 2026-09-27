@@ -95,29 +95,172 @@ func TestTypedFunctionBindings(t *testing.T) {
 		{BindFunc3Err("f", func(a, b, c int64) (int64, error) { return a + b + c, nil }), []ref.Val{i, i, i}},
 		{BindContextFunc3("f", func(_ context.Context, a, b, c int64) int64 { return a + b + c }), []ref.Val{i, i, i}},
 		{BindContextFunc3Err("f", func(_ context.Context, a, b, c int64) (int64, error) { return a + b + c, nil }), []ref.Val{i, i, i}},
+		{BindFunc4("f", func(a, b, c, d int64) int64 { return a + b + c + d }), []ref.Val{i, i, i, i}},
+		{BindFunc4Err("f", func(a, b, c, d int64) (int64, error) { return a + b + c + d, nil }), []ref.Val{i, i, i, i}},
+		{BindContextFunc4("f", func(_ context.Context, a, b, c, d int64) int64 { return a + b + c + d }), []ref.Val{i, i, i, i}},
+		{BindContextFunc4Err("f", func(_ context.Context, a, b, c, d int64) (int64, error) { return a + b + c + d, nil }), []ref.Val{i, i, i, i}},
+		{BindFunc5("f", func(a, b, c, d, e int64) int64 { return a + b + c + d + e }), []ref.Val{i, i, i, i, i}},
+		{BindFunc5Err("f", func(a, b, c, d, e int64) (int64, error) { return a + b + c + d + e, nil }), []ref.Val{i, i, i, i, i}},
+		{BindContextFunc5("f", func(_ context.Context, a, b, c, d, e int64) int64 { return a + b + c + d + e }), []ref.Val{i, i, i, i, i}},
+		{BindContextFunc5Err("f", func(_ context.Context, a, b, c, d, e int64) (int64, error) { return a + b + c + d + e, nil }), []ref.Val{i, i, i, i, i}},
+		{BindFunc6("f", func(a, b, c, d, e, f int64) int64 { return a + b + c + d + e + f }), []ref.Val{i, i, i, i, i, i}},
+		{BindFunc6Err("f", func(a, b, c, d, e, f int64) (int64, error) { return a + b + c + d + e + f, nil }), []ref.Val{i, i, i, i, i, i}},
+		{BindContextFunc6("f", func(_ context.Context, a, b, c, d, e, f int64) int64 { return a + b + c + d + e + f }), []ref.Val{i, i, i, i, i, i}},
+		{BindContextFunc6Err("f", func(_ context.Context, a, b, c, d, e, f int64) (int64, error) { return a + b + c + d + e + f, nil }), []ref.Val{i, i, i, i, i, i}},
+		{BindFunc7("f", func(a, b, c, d, e, f, g int64) int64 { return a + b + c + d + e + f + g }), []ref.Val{i, i, i, i, i, i, i}},
+		{BindFunc7Err("f", func(a, b, c, d, e, f, g int64) (int64, error) { return a + b + c + d + e + f + g, nil }), []ref.Val{i, i, i, i, i, i, i}},
+		{BindContextFunc7("f", func(_ context.Context, a, b, c, d, e, f, g int64) int64 { return a + b + c + d + e + f + g }), []ref.Val{i, i, i, i, i, i, i}},
+		{BindContextFunc7Err("f", func(_ context.Context, a, b, c, d, e, f, g int64) (int64, error) {
+			return a + b + c + d + e + f + g, nil
+		}), []ref.Val{i, i, i, i, i, i, i}},
+		{BindFunc8("f", func(a, b, c, d, e, f, g, h int64) int64 { return a + b + c + d + e + f + g + h }), []ref.Val{i, i, i, i, i, i, i, i}},
+		{BindFunc8Err("f", func(a, b, c, d, e, f, g, h int64) (int64, error) { return a + b + c + d + e + f + g + h, nil }), []ref.Val{i, i, i, i, i, i, i, i}},
+		{BindContextFunc8("f", func(_ context.Context, a, b, c, d, e, f, g, h int64) int64 { return a + b + c + d + e + f + g + h }), []ref.Val{i, i, i, i, i, i, i, i}},
+		{BindContextFunc8Err("f", func(_ context.Context, a, b, c, d, e, f, g, h int64) (int64, error) {
+			return a + b + c + d + e + f + g + h, nil
+		}), []ref.Val{i, i, i, i, i, i, i, i}},
 	}
 	for index, test := range tests {
 		if test.binding.err != nil || test.binding.function == nil {
 			t.Fatalf("binding %d: %v", index, test.binding.err)
 		}
-		if result := test.binding.function.call(ctx, test.args); types.IsError(result) {
+		if result := callBoundFunction(ctx, test.binding.function, test.args); types.IsError(result) {
 			t.Fatalf("binding %d: %v", index, result)
+		}
+	}
+	for _, index := range []int{16, 20, 24, 28, 32} {
+		test := tests[index]
+		for argument := range test.args {
+			invalid := append([]ref.Val(nil), test.args...)
+			invalid[argument] = types.String("bad")
+			if !types.IsError(callBoundFunction(ctx, test.binding.function, invalid)) {
+				t.Fatalf("binding %d accepted invalid argument %d", index, argument)
+			}
 		}
 	}
 
 	failing := BindFunc1Err("f", func(int64) (int64, error) { return 0, errors.New("failed") })
-	if !types.IsError(failing.function.call(ctx, []ref.Val{i})) {
+	if !types.IsError(callBoundFunction(ctx, failing.function, []ref.Val{i})) {
 		t.Fatal("typed binding lost function error")
 	}
-	if !types.IsError(failing.function.call(ctx, nil)) {
+	if !types.IsError(callBoundFunction(ctx, failing.function, nil)) {
 		t.Fatal("typed binding accepted wrong argument count")
 	}
-	if !types.IsError(failing.function.call(ctx, []ref.Val{types.String("bad")})) {
+	if !types.IsError(callBoundFunction(ctx, failing.function, []ref.Val{types.String("bad")})) {
 		t.Fatal("typed binding accepted wrong argument type")
 	}
 	var nilFunction func(int64) int64
 	if binding := BindFunc1("f", nilFunction); binding.err == nil {
 		t.Fatal("typed binding accepted nil function")
+	}
+	if binding := newTypedBinding("f", nil, &boundFunction{}); binding.err == nil {
+		t.Fatal("typed binding accepted untyped nil")
+	}
+	if binding := newTypedBinding("f", func(int) int { return 0 }, &boundFunction{}); binding.err == nil {
+		t.Fatal("typed binding accepted unsupported signature")
+	}
+	for _, result := range []ref.Val{
+		typedResult(true, nil), typedResult("x", nil), typedResult(int64(1), nil),
+		typedResult(uint64(1), nil), typedResult(float64(1), nil),
+		typedResult(time.Second, nil), typedResult([]int64{1}, nil),
+	} {
+		if types.IsError(result) {
+			t.Fatal(result)
+		}
+	}
+}
+
+func TestTypedRuntimeArities(t *testing.T) {
+	value := int64(0)
+	runtime, err := New(
+		Symbol[int64]("value"),
+		Symbol[func() int64]("f0"),
+		Symbol[func(int64) int64]("f1"),
+		Symbol[func(int64, int64) int64]("f2"),
+		Symbol[func(int64, int64, int64) int64]("f3"),
+		Symbol[func(int64, int64, int64, int64) int64]("f4"),
+		Symbol[func(int64, int64, int64, int64, int64) int64]("f5"),
+		Symbol[func(int64, int64, int64, int64, int64, int64) int64]("f6"),
+		Symbol[func(int64, int64, int64, int64, int64, int64, int64) int64]("f7"),
+		Symbol[func(int64, int64, int64, int64, int64, int64, int64, int64) int64]("f8"),
+		Case("run", Self("value"), With("f0()+f1(1)+f2(1,1)+f3(1,1,1)+f4(1,1,1,1)+f5(1,1,1,1,1)+f6(1,1,1,1,1,1)+f7(1,1,1,1,1,1,1)+f8(1,1,1,1,1,1,1,1)")),
+	).Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := []Binding{
+		Bind("value", &value),
+		BindFunc0("f0", func() int64 { return 0 }),
+		BindFunc1("f1", func(a int64) int64 { return a }),
+		BindFunc2("f2", func(a, b int64) int64 { return a + b }),
+		BindFunc3("f3", func(a, b, c int64) int64 { return a + b + c }),
+		BindFunc4("f4", func(a, b, c, d int64) int64 { return a + b + c + d }),
+		BindFunc5("f5", func(a, b, c, d, e int64) int64 { return a + b + c + d + e }),
+		BindFunc6("f6", func(a, b, c, d, e, f int64) int64 { return a + b + c + d + e + f }),
+		BindFunc7("f7", func(a, b, c, d, e, f, g int64) int64 { return a + b + c + d + e + f + g }),
+		BindFunc8("f8", func(a, b, c, d, e, f, g, h int64) int64 { return a + b + c + d + e + f + g + h }),
+	}
+	var scope Scope
+	if err := runtime.Do(context.Background(), &scope, "run", bindings...); err != nil {
+		t.Fatal(err)
+	}
+	if value != 36 {
+		t.Fatalf("value=%d", value)
+	}
+}
+
+func TestSegmentPoolCleanupAndOrderCapacity(t *testing.T) {
+	runtime, err := New(
+		Symbol[int64]("a"), Symbol[int64]("b"),
+		Case("run", Self("a"), With("a+1"), Self("b"), With("b+1")),
+	).Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := runtime.segmentPool.Get().(*segment)
+	if cap(scratch.order) < 2 {
+		t.Fatalf("order capacity=%d", cap(scratch.order))
+	}
+	scratch.values[0] = segmentValue{snapshot: &struct{}{}, pending: types.Int(1), native: &struct{}{}, hasSnapshot: true, hasPending: true}
+	scratch.order = append(scratch.order, 0)
+	scratch.activation.context = context.Background()
+	scratch.activation.bindings = []preparedBinding{{set: true}}
+	runtime.releaseSegment(scratch)
+	reused := runtime.segmentPool.Get().(*segment)
+	defer runtime.releaseSegment(reused)
+	if len(reused.order) != 0 || reused.values[0].hasSnapshot || reused.values[0].hasPending || reused.values[0].snapshot != nil || reused.values[0].pending != nil || reused.values[0].native != nil {
+		t.Fatalf("pooled segment retained state: %#v", reused)
+	}
+	if reused.activation.context != nil || reused.activation.bindings != nil || reused.activation.segment != nil {
+		t.Fatalf("pooled activation retained state: %#v", reused.activation)
+	}
+}
+
+func callBoundFunction(ctx context.Context, function *boundFunction, args []ref.Val) ref.Val {
+	switch function.typedArity {
+	case 0:
+		return function.call0(ctx)
+	case 1:
+		if len(args) != 1 {
+			return types.NewErr("wrong argument count")
+		}
+		return function.call1(ctx, args[0])
+	case 2:
+		return function.call2(ctx, args[0], args[1])
+	case 3:
+		return function.call3(ctx, args[0], args[1], args[2])
+	case 4:
+		return function.call4(ctx, args[0], args[1], args[2], args[3])
+	case 5:
+		return function.call5(ctx, args[0], args[1], args[2], args[3], args[4])
+	case 6:
+		return function.call6(ctx, args[0], args[1], args[2], args[3], args[4], args[5])
+	case 7:
+		return function.call7(ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+	case 8:
+		return function.call8(ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+	default:
+		return types.NewErr("unsupported test arity")
 	}
 }
 
