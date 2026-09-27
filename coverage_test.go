@@ -72,6 +72,55 @@ func TestAllFunctionAdapters(t *testing.T) {
 	}
 }
 
+func TestTypedFunctionBindings(t *testing.T) {
+	ctx := context.Background()
+	i := types.Int(1)
+	tests := []struct {
+		binding Binding
+		args    []ref.Val
+	}{
+		{BindFunc0("f", func() int64 { return 1 }), nil},
+		{BindFunc0Err("f", func() (int64, error) { return 1, nil }), nil},
+		{BindContextFunc0("f", func(context.Context) int64 { return 1 }), nil},
+		{BindContextFunc0Err("f", func(context.Context) (int64, error) { return 1, nil }), nil},
+		{BindFunc1("f", func(a int64) int64 { return a }), []ref.Val{i}},
+		{BindFunc1Err("f", func(a int64) (int64, error) { return a, nil }), []ref.Val{i}},
+		{BindContextFunc1("f", func(_ context.Context, a int64) int64 { return a }), []ref.Val{i}},
+		{BindContextFunc1Err("f", func(_ context.Context, a int64) (int64, error) { return a, nil }), []ref.Val{i}},
+		{BindFunc2("f", func(a, b int64) int64 { return a + b }), []ref.Val{i, i}},
+		{BindFunc2Err("f", func(a, b int64) (int64, error) { return a + b, nil }), []ref.Val{i, i}},
+		{BindContextFunc2("f", func(_ context.Context, a, b int64) int64 { return a + b }), []ref.Val{i, i}},
+		{BindContextFunc2Err("f", func(_ context.Context, a, b int64) (int64, error) { return a + b, nil }), []ref.Val{i, i}},
+		{BindFunc3("f", func(a, b, c int64) int64 { return a + b + c }), []ref.Val{i, i, i}},
+		{BindFunc3Err("f", func(a, b, c int64) (int64, error) { return a + b + c, nil }), []ref.Val{i, i, i}},
+		{BindContextFunc3("f", func(_ context.Context, a, b, c int64) int64 { return a + b + c }), []ref.Val{i, i, i}},
+		{BindContextFunc3Err("f", func(_ context.Context, a, b, c int64) (int64, error) { return a + b + c, nil }), []ref.Val{i, i, i}},
+	}
+	for index, test := range tests {
+		if test.binding.err != nil || test.binding.function == nil {
+			t.Fatalf("binding %d: %v", index, test.binding.err)
+		}
+		if result := test.binding.function.call(ctx, test.args); types.IsError(result) {
+			t.Fatalf("binding %d: %v", index, result)
+		}
+	}
+
+	failing := BindFunc1Err("f", func(int64) (int64, error) { return 0, errors.New("failed") })
+	if !types.IsError(failing.function.call(ctx, []ref.Val{i})) {
+		t.Fatal("typed binding lost function error")
+	}
+	if !types.IsError(failing.function.call(ctx, nil)) {
+		t.Fatal("typed binding accepted wrong argument count")
+	}
+	if !types.IsError(failing.function.call(ctx, []ref.Val{types.String("bad")})) {
+		t.Fatal("typed binding accepted wrong argument type")
+	}
+	var nilFunction func(int64) int64
+	if binding := BindFunc1("f", nilFunction); binding.err == nil {
+		t.Fatal("typed binding accepted nil function")
+	}
+}
+
 func TestNestedCasesReadinessAndFailures(t *testing.T) {
 	p := New(Symbol[int64]("v"), Case("root", Case("child", Self("v"), Skip("true"), With("v+100")), With("v+1")), Case("writer", Self("v"), With("v+1")))
 	r, err := p.Compile()

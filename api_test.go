@@ -554,3 +554,34 @@ func TestListSymbolsFromJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestPreparedExecution(t *testing.T) {
+	value := int64(1)
+	runtime, err := causal.New(
+		causal.Symbol[int64]("value"),
+		causal.Symbol[func(int64) int64]("increment"),
+		causal.Case("run", causal.Self("value"), causal.With("increment(value)")),
+	).Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := runtime.Prepare("run",
+		causal.Bind("value", &value),
+		causal.BindFunc1("increment", func(v int64) int64 { return v + 1 }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scope causal.Scope
+	for range 2 {
+		if err := execution.Do(context.Background(), &scope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if value != 3 {
+		t.Fatalf("value=%d", value)
+	}
+	if _, err := runtime.Prepare("run", causal.Bind("value", &value)); err == nil {
+		t.Fatal("prepared an execution with a missing function binding")
+	}
+}

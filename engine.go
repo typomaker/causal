@@ -6,22 +6,35 @@ import (
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/common/types/traits"
+	"github.com/google/cel-go/interpreter"
 	"reflect"
 )
 
 type segment struct {
-	snapshot, pending map[string]any
-	order             []string
+	values     []segmentValue
+	order      []int
+	activation expressionActivation
+}
+
+type segmentValue struct {
+	snapshot    any
+	pending     ref.Val
+	native      any
+	hasSnapshot bool
+	hasPending  bool
 }
 
 type preparedBinding struct {
 	Binding
 	call functionCall
+	set  bool
 }
 
-type expressionExecution struct {
+type expressionActivation struct {
+	runtime  *Runtime
 	context  context.Context
-	bindings map[string]preparedBinding
+	bindings []preparedBinding
+	segment  *segment
 }
 
 // Do validates all bindings required by the complete root Case, then executes
@@ -35,14 +48,44 @@ func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ..
 	if scope == nil {
 		return fmt.Errorf("causal: nil scope")
 	}
+	execution, err := r.Prepare(name, bindings...)
+	if err != nil {
+		return err
+	}
+	return execution.Do(ctx, scope)
+}
+
+// Execution is a validated binding set for one root Case. It can be reused to
+// avoid validating the same bindings on every call to [Runtime.Do].
+type Execution struct {
+	runtime  *Runtime
+	caseName string
+	compiled *compiledCase
+	bindings []preparedBinding
+}
+
+// Prepare validates bindings once and returns a reusable execution.
+func (r *Runtime) Prepare(name string, bindings ...Binding) (*Execution, error) {
 	cc, ok := r.cases[name]
 	if !ok {
-		return fmt.Errorf("causal: unknown case %q", name)
+		return nil, fmt.Errorf("causal: unknown case %q", name)
 	}
 	bound, err := r.validateBindings(cc, bindings)
 	if err != nil {
-		return fmt.Errorf("causal: case %q: %w", name, err)
+		return nil, fmt.Errorf("causal: case %q: %w", name, err)
 	}
+	return &Execution{runtime: r, caseName: name, compiled: cc, bindings: bound}, nil
+}
+
+// Do executes the prepared root Case until completion or the next Wait.
+func (e *Execution) Do(ctx context.Context, scope *Scope) error {
+	if e == nil || e.runtime == nil || e.compiled == nil {
+		return fmt.Errorf("causal: invalid execution")
+	}
+	if scope == nil {
+		return fmt.Errorf("causal: nil scope")
+	}
+	r, name, cc, bound := e.runtime, e.caseName, e.compiled, e.bindings
 	scope.mu.Lock()
 	defer scope.mu.Unlock()
 	scope.init()
@@ -64,7 +107,8 @@ func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ..
 		pc = c.PC
 	}
 	scope.ready[name] = false
-	seg := &segment{snapshot: map[string]any{}, pending: map[string]any{}}
+	seg := &segment{values: make([]segmentValue, len(r.symbols))}
+	seg.activation = expressionActivation{runtime: r, bindings: bound, segment: seg}
 	for pc < len(cc.code) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -76,10 +120,12 @@ func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ..
 			if e != nil {
 				return fmt.Errorf("causal: case %q With %q: %w", name, ins.source, e)
 			}
-			if _, ok := seg.pending[ins.target]; !ok {
-				seg.order = append(seg.order, ins.target)
+			entry := &seg.values[ins.targetIndex]
+			if !entry.hasPending {
+				seg.order = append(seg.order, ins.targetIndex)
 			}
-			seg.pending[ins.target] = v
+			entry.pending = v
+			entry.hasPending = true
 		case instSkip:
 			v, e := r.eval(ctx, bound, seg, ins)
 			if e != nil {
@@ -120,8 +166,8 @@ func (r *Runtime) Do(ctx context.Context, scope *Scope, name string, bindings ..
 	return nil
 }
 
-func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[string]preparedBinding, error) {
-	m := map[string]preparedBinding{}
+func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) ([]preparedBinding, error) {
+	prepared := make([]preparedBinding, len(r.symbols))
 	for _, b := range items {
 		if b.err != nil {
 			return nil, fmt.Errorf("invalid binding %q: %w", b.name, b.err)
@@ -129,13 +175,14 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[strin
 		if b.name == "" {
 			return nil, fmt.Errorf("binding name is empty")
 		}
-		if _, ok := m[b.name]; ok {
-			return nil, fmt.Errorf("duplicate binding %q", b.name)
-		}
-		c, ok := r.contracts[b.name]
+		index, ok := r.symbolIndexes[b.name]
 		if !ok {
 			return nil, fmt.Errorf("binding for undeclared symbol %q", b.name)
 		}
+		if prepared[index].set {
+			return nil, fmt.Errorf("duplicate binding %q", b.name)
+		}
+		c := r.symbols[index]
 		if c.function {
 			if b.function == nil || b.value.IsValid() {
 				return nil, fmt.Errorf("function symbol %q binding must be a function", b.name)
@@ -143,7 +190,7 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[strin
 			if err := validateFunctionBinding(c, b.function.contract); err != nil {
 				return nil, err
 			}
-			m[b.name] = preparedBinding{Binding: b, call: b.function.call}
+			prepared[index] = preparedBinding{Binding: b, call: b.function.call, set: true}
 		} else {
 			if !b.value.IsValid() || b.function != nil {
 				return nil, fmt.Errorf("value symbol %q binding must be a non-nil pointer", b.name)
@@ -152,37 +199,27 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[strin
 			if !supported || kind != c.kind || c.goType != nil && b.valueType != c.goType {
 				return nil, fmt.Errorf("symbol %q binding type %v does not match %s", b.name, b.valueType, c.kind)
 			}
-			m[b.name] = preparedBinding{Binding: b}
+			prepared[index] = preparedBinding{Binding: b, set: true}
 		}
 	}
-	for n := range cc.requirements {
-		_, ok := m[n]
-		if !ok {
-			return nil, fmt.Errorf("missing binding for symbol %q", n)
+	for _, index := range cc.requirementIndexes {
+		if !prepared[index].set {
+			return nil, fmt.Errorf("missing binding for symbol %q", r.symbols[index].symbol.Name)
 		}
 	}
-	return m, nil
+	return prepared, nil
 }
 
-func (r *Runtime) eval(ctx context.Context, bound map[string]preparedBinding, seg *segment, ins instruction) (ref.Val, error) {
-	activation := make(map[string]any, len(ins.expr.reads)+1)
-	for _, dep := range ins.expr.reads {
-		if v, ok := seg.pending[dep]; ok {
-			activation[dep] = v
-			continue
+func (r *Runtime) eval(ctx context.Context, bound []preparedBinding, seg *segment, ins instruction) (ref.Val, error) {
+	for _, index := range ins.expr.readIndexes {
+		entry := &seg.values[index]
+		if !entry.hasPending && !entry.hasSnapshot {
+			entry.snapshot = bound[index].value.Elem().Interface()
+			entry.hasSnapshot = true
 		}
-		if v, ok := seg.snapshot[dep]; ok {
-			activation[dep] = v
-			continue
-		}
-		v := bound[dep].value.Elem().Interface()
-		seg.snapshot[dep] = v
-		activation[dep] = v
 	}
-	if len(ins.expr.functions) != 0 {
-		activation[executionActivationName] = &expressionExecution{context: ctx, bindings: bound}
-	}
-	v, _, e := ins.expr.program.Eval(activation)
+	seg.activation.context = ctx
+	v, _, e := ins.expr.program.Eval(&seg.activation)
 	if e != nil {
 		return nil, e
 	}
@@ -191,29 +228,48 @@ func (r *Runtime) eval(ctx context.Context, bound map[string]preparedBinding, se
 	}
 	return v, nil
 }
-func (r *Runtime) commit(ctx context.Context, s *Scope, bound map[string]preparedBinding, seg *segment) error {
+func (a *expressionActivation) ResolveName(name string) (any, bool) {
+	if name == executionActivationName {
+		return a, true
+	}
+	index, ok := a.runtime.symbolIndexes[name]
+	if !ok || !a.bindings[index].set {
+		return nil, false
+	}
+	entry := &a.segment.values[index]
+	if entry.hasPending {
+		return entry.pending, true
+	}
+	if entry.hasSnapshot {
+		return entry.snapshot, true
+	}
+	return nil, false
+}
+
+func (*expressionActivation) Parent() interpreter.Activation { return nil }
+
+func (r *Runtime) commit(ctx context.Context, s *Scope, bound []preparedBinding, seg *segment) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	for _, n := range seg.order {
-		v := seg.pending[n].(ref.Val)
-		native, err := nativeValue(v, bound[n].valueType)
+	for _, index := range seg.order {
+		entry := &seg.values[index]
+		native, err := nativeValue(entry.pending, bound[index].valueType)
 		if err != nil {
-			return fmt.Errorf("causal: symbol %q: cannot assign CEL %s to %v Symbol", n, v.Type(), bound[n].valueType)
+			return fmt.Errorf("causal: symbol %q: cannot assign CEL %s to %v Symbol", r.symbols[index].symbol.Name, entry.pending.Type(), bound[index].valueType)
 		}
-		seg.pending[n] = native
+		entry.native = native
 	}
-	for _, n := range seg.order {
-		bound[n].value.Elem().Set(reflect.ValueOf(seg.pending[n]))
+	for _, index := range seg.order {
+		bound[index].value.Elem().Set(reflect.ValueOf(seg.values[index].native))
 	}
-	for _, n := range seg.order {
-		for _, c := range r.dependents[n] {
+	for _, index := range seg.order {
+		for _, c := range r.dependents[index] {
 			s.ready[c] = true
 		}
 	}
-	seg.snapshot = map[string]any{}
-	seg.pending = map[string]any{}
-	seg.order = nil
+	clear(seg.values)
+	seg.order = seg.order[:0]
 	return nil
 }
 

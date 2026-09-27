@@ -26,6 +26,7 @@ const (
 type instruction struct {
 	kind           instructionKind
 	target, source string
+	targetIndex    int
 	expr           *compiledExpr
 	jump           int
 }
@@ -33,16 +34,18 @@ type instruction struct {
 // compiledExpr contains all immutable work needed to evaluate one expression.
 // In particular, dependency discovery and CEL planning happen during Compile.
 type compiledExpr struct {
-	reads     []string
-	functions []string
-	output    *cel.Type
-	program   cel.Program
+	reads       []string
+	readIndexes []int
+	functions   []string
+	output      *cel.Type
+	program     cel.Program
 }
 type compiledCase struct {
-	name         string
-	code         []instruction
-	deps         map[string]struct{}
-	requirements map[string]struct{}
+	name               string
+	code               []instruction
+	deps               map[string]struct{}
+	requirements       map[string]struct{}
+	requirementIndexes []int
 }
 
 // Runtime is an immutable compiled program and is safe for concurrent use. Use
@@ -53,10 +56,11 @@ type compiledCase struct {
 //		err = runtime.Do(ctx, &scope, "attack", bindings...)
 //	}
 type Runtime struct {
-	cases      map[string]*compiledCase
-	contracts  map[string]symbolContract
-	dependents map[string][]string
-	version    string
+	cases         map[string]*compiledCase
+	symbols       []symbolContract
+	symbolIndexes map[string]int
+	dependents    [][]string
+	version       string
 }
 
 func compile(program Program) (*Runtime, error) {
@@ -109,9 +113,14 @@ func compile(program Program) (*Runtime, error) {
 	if len(program.AST.Cases) == 0 {
 		return nil, fmt.Errorf("causal: program has no cases")
 	}
+	names := sortedContracts(contracts)
+	symbolIndexes := make(map[string]int, len(names))
+	symbols := make([]symbolContract, len(names))
 	opts := []cel.EnvOption{cel.CrossTypeNumericComparisons(true), maxFunction()}
-	for _, name := range sortedContracts(contracts) {
+	for index, name := range names {
 		c := contracts[name]
+		symbolIndexes[name] = index
+		symbols[index] = c
 		if c.function {
 			args := make([]*cel.Type, len(c.args))
 			for i, k := range c.args {
@@ -127,10 +136,10 @@ func compile(program Program) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Runtime{cases: map[string]*compiledCase{}, contracts: contracts, dependents: map[string][]string{}, version: programVersion(program, contracts)}
+	r := &Runtime{cases: map[string]*compiledCase{}, symbols: symbols, symbolIndexes: symbolIndexes, dependents: make([][]string, len(symbols)), version: programVersion(program, contracts)}
 	for _, def := range program.AST.Cases {
 		cc := &compiledCase{name: def.Name, deps: map[string]struct{}{}, requirements: map[string]struct{}{}}
-		if _, err := compileStatements(env, def, defs, &cc.code, cc.deps, cc.requirements, "", []string{def.Name}); err != nil {
+		if _, err := compileStatements(env, def, defs, symbolIndexes, &cc.code, cc.deps, cc.requirements, "", []string{def.Name}); err != nil {
 			return nil, fmt.Errorf("causal: case %q: %w", def.Name, err)
 		}
 		for dep := range cc.deps {
@@ -139,14 +148,32 @@ func compile(program Program) (*Runtime, error) {
 				return nil, fmt.Errorf("causal: case %q: undeclared value symbol %q", def.Name, dep)
 			}
 			cc.requirements[dep] = struct{}{}
-			r.dependents[dep] = append(r.dependents[dep], def.Name)
+			index := symbolIndexes[dep]
+			r.dependents[index] = append(r.dependents[index], def.Name)
+		}
+		cc.requirementIndexes = make([]int, 0, len(cc.requirements))
+		for name := range cc.requirements {
+			cc.requirementIndexes = append(cc.requirementIndexes, symbolIndexes[name])
+		}
+		sort.Ints(cc.requirementIndexes)
+		for i := range cc.code {
+			ins := &cc.code[i]
+			if ins.target != "" {
+				ins.targetIndex = symbolIndexes[ins.target]
+			}
+			if ins.expr != nil {
+				ins.expr.readIndexes = make([]int, len(ins.expr.reads))
+				for j, name := range ins.expr.reads {
+					ins.expr.readIndexes[j] = symbolIndexes[name]
+				}
+			}
 		}
 		r.cases[def.Name] = cc
 	}
 	return r, nil
 }
 
-func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code *[]instruction, deps map[string]struct{}, req map[string]struct{}, self string, path []string) (string, error) {
+func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, symbolIndexes map[string]int, code *[]instruction, deps map[string]struct{}, req map[string]struct{}, self string, path []string) (string, error) {
 	start := len(*code)
 	for _, raw := range c.Statements {
 		switch s := raw.(type) {
@@ -159,7 +186,7 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code 
 			if self == "" {
 				return self, fmt.Errorf("With %q has no preceding Self", s.Expression)
 			}
-			a, e := compileExpr(env, s.Expression, req)
+			a, e := compileExprIndexed(env, s.Expression, req, symbolIndexes)
 			if e != nil {
 				return self, e
 			}
@@ -170,7 +197,7 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code 
 			req[self] = struct{}{}
 			*code = append(*code, instruction{kind: instWith, target: self, source: s.Expression, expr: a})
 		case ast.Skip:
-			a, e := compileExpr(env, s.Expression, req)
+			a, e := compileExprIndexed(env, s.Expression, req, symbolIndexes)
 			if e != nil {
 				return self, e
 			}
@@ -182,7 +209,7 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code 
 			}
 			*code = append(*code, instruction{kind: instSkip, source: s.Expression, expr: a, jump: -1})
 		case ast.Wait:
-			a, e := compileExpr(env, s.Expression, req)
+			a, e := compileExprIndexed(env, s.Expression, req, symbolIndexes)
 			if e != nil {
 				return self, e
 			}
@@ -195,7 +222,7 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code 
 			*code = append(*code, instruction{kind: instWait, source: s.Expression, expr: a})
 		case ast.Case:
 			var e error
-			self, e = compileStatements(env, s, defs, code, deps, req, self, append(path, s.Name))
+			self, e = compileStatements(env, s, defs, symbolIndexes, code, deps, req, self, append(path, s.Name))
 			if e != nil {
 				return self, e
 			}
@@ -210,7 +237,7 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, code 
 				}
 			}
 			var e error
-			self, e = compileStatements(env, target, defs, code, deps, req, self, append(path, s.Name))
+			self, e = compileStatements(env, target, defs, symbolIndexes, code, deps, req, self, append(path, s.Name))
 			if e != nil {
 				return self, e
 			}
@@ -260,6 +287,10 @@ func celType(k string) *cel.Type {
 const executionActivationName = "@causal.execution"
 
 func compileExpr(env *cel.Env, src string, requirements map[string]struct{}) (*compiledExpr, error) {
+	return compileExprIndexed(env, src, requirements, nil)
+}
+
+func compileExprIndexed(env *cel.Env, src string, requirements map[string]struct{}, symbolIndexes map[string]int) (*compiledExpr, error) {
 	if strings.TrimSpace(src) == "" {
 		return nil, fmt.Errorf("empty CEL expression")
 	}
@@ -279,7 +310,7 @@ func compileExpr(env *cel.Env, src string, requirements map[string]struct{}) (*c
 	for _, name := range functions {
 		requirements[name] = struct{}{}
 	}
-	p, err := env.Program(a, cel.CustomDecorator(dynamicFunctionDecorator(functionSet)))
+	p, err := env.Program(a, cel.CustomDecorator(dynamicFunctionDecorator(functionSet, symbolIndexes)))
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +371,7 @@ func collectExpressionMetadata(e *exprpb.Expr, refs map[int64]*exprpb.Reference,
 	}
 }
 
-func dynamicFunctionDecorator(functions map[string]struct{}) interpreter.InterpretableDecorator {
+func dynamicFunctionDecorator(functions map[string]struct{}, symbolIndexes map[string]int) interpreter.InterpretableDecorator {
 	return func(value interpreter.Interpretable) (interpreter.Interpretable, error) {
 		call, ok := value.(interpreter.InterpretableCall)
 		if !ok {
@@ -350,14 +381,19 @@ func dynamicFunctionDecorator(functions map[string]struct{}) interpreter.Interpr
 		if _, ok := functions[name]; !ok {
 			return value, nil
 		}
-		return &dynamicFunctionCall{id: call.ID(), name: name, args: call.Args()}, nil
+		index, ok := symbolIndexes[name]
+		if !ok {
+			index = -1
+		}
+		return &dynamicFunctionCall{id: call.ID(), name: name, index: index, args: call.Args()}, nil
 	}
 }
 
 type dynamicFunctionCall struct {
-	id   int64
-	name string
-	args []interpreter.Interpretable
+	id    int64
+	name  string
+	index int
+	args  []interpreter.Interpretable
 }
 
 func (c *dynamicFunctionCall) ID() int64 { return c.id }
@@ -366,12 +402,11 @@ func (c *dynamicFunctionCall) Eval(activation interpreter.Activation) ref.Val {
 	if !ok {
 		return types.NewErr("causal: missing function activation")
 	}
-	execution, ok := value.(*expressionExecution)
+	execution, ok := value.(*expressionActivation)
 	if !ok {
 		return types.NewErr("causal: invalid function activation")
 	}
-	binding, ok := execution.bindings[c.name]
-	if !ok || binding.call == nil {
+	if c.index < 0 || c.index >= len(execution.bindings) || !execution.bindings[c.index].set || execution.bindings[c.index].call == nil {
 		return types.NewErr("causal: missing function %s", c.name)
 	}
 	args := make([]ref.Val, len(c.args))
@@ -381,7 +416,7 @@ func (c *dynamicFunctionCall) Eval(activation interpreter.Activation) ref.Val {
 			return args[i]
 		}
 	}
-	return binding.call(execution.context, args)
+	return execution.bindings[c.index].call(execution.context, args)
 }
 func sameSymbolSignature(a, b symbolContract) bool {
 	if a.function != b.function {

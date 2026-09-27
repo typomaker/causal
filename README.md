@@ -61,6 +61,24 @@ err = runtime.Do(ctx, &scope, "attack",
 )
 ```
 
+When the same case and bindings are executed repeatedly, validate them once
+with `Prepare` and reuse the resulting execution:
+
+```go
+execution, err := runtime.Prepare("attack",
+    causal.Bind("health", &health),
+    causal.Bind("damage", &damage),
+)
+if err != nil {
+    return err
+}
+
+err = execution.Do(ctx, &scope)
+```
+
+`Runtime.Do` remains the convenient one-shot API. A prepared `Execution` avoids
+binding validation and name-to-index mapping on every call.
+
 Only symbols required by the selected root case need bindings. A written symbol
 and a read-only symbol both use a non-nil pointer of the declared type. The
 program determines whether the value is written.
@@ -252,6 +270,19 @@ causal.Bind("health", &character.Health)
 causal.Bind("damage", &attack.Damage)
 causal.Bind("calculate_damage", calculateDamage)
 ```
+
+For frequently called functions with zero to three arguments, typed binders
+avoid reflection during invocation:
+
+```go
+causal.BindContextFunc2Err("calculate_damage", calculateDamage)
+causal.BindFunc1Err("normalize", normalize)
+causal.BindFunc2("combine", combine)
+```
+
+Each arity has plain, error-returning, context-aware, and context-plus-error
+variants. The general `Bind` API continues to support arbitrary function
+signatures and uses reflection only for the actual Go function call.
 
 List values may also be passed to and returned from functions. For example,
 `Symbol[func([]string) []string]("normalize")` declares a CEL function with the

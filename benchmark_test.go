@@ -50,6 +50,43 @@ func BenchmarkDo(b *testing.B) {
 		}
 	})
 
+	b.Run("typed function symbol", func(b *testing.B) {
+		runtime, err := New(Symbol[int64]("value"), Symbol[func(int64) int64]("increment"), Case("run", Self("value"), With("increment(value)"))).Compile()
+		if err != nil {
+			b.Fatal(err)
+		}
+		value := int64(1)
+		bindings := []Binding{Bind("value", &value), BindFunc1("increment", func(v int64) int64 { return v + 1 })}
+		var scope Scope
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if err := runtime.Do(ctx, &scope, "run", bindings...); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("prepared typed function symbol", func(b *testing.B) {
+		runtime, err := New(Symbol[int64]("value"), Symbol[func(int64) int64]("increment"), Case("run", Self("value"), With("increment(value)"))).Compile()
+		if err != nil {
+			b.Fatal(err)
+		}
+		value := int64(1)
+		execution, err := runtime.Prepare("run", Bind("value", &value), BindFunc1("increment", func(v int64) int64 { return v + 1 }))
+		if err != nil {
+			b.Fatal(err)
+		}
+		var scope Scope
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if err := execution.Do(ctx, &scope); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
 	b.Run("context+error function", func(b *testing.B) {
 		runtime, err := New(Symbol[int64]("value"), Symbol[func(context.Context, int64) (int64, error)]("increment"), Case("run", Self("value"), With("increment(value)"))).Compile()
 		if err != nil {
