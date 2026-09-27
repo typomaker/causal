@@ -370,8 +370,8 @@ func (c *dynamicFunctionCall) Eval(activation interpreter.Activation) ref.Val {
 	if !ok {
 		return types.NewErr("causal: invalid function activation")
 	}
-	call, ok := execution.functions[c.name]
-	if !ok {
+	binding, ok := execution.bindings[c.name]
+	if !ok || binding.call == nil {
 		return types.NewErr("causal: missing function %s", c.name)
 	}
 	args := make([]ref.Val, len(c.args))
@@ -381,7 +381,7 @@ func (c *dynamicFunctionCall) Eval(activation interpreter.Activation) ref.Val {
 			return args[i]
 		}
 	}
-	return call(execution.context, args)
+	return binding.call(execution.context, args)
 }
 func sameSymbolSignature(a, b symbolContract) bool {
 	if a.function != b.function {

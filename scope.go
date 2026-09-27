@@ -14,7 +14,7 @@ type Binding struct {
 	name      string
 	value     reflect.Value
 	valueType reflect.Type
-	function  any
+	function  *boundFunction
 	err       error
 }
 
@@ -40,7 +40,7 @@ func Bind(name string, implementation any) Binding {
 		b.value = v
 		b.valueType = t.Elem()
 	case reflect.Func:
-		b.function = implementation
+		b.function, b.err = prepareFunction(name, implementation)
 	default:
 		b.err = fmt.Errorf("implementation has type %v, want non-nil pointer or function", t)
 	}

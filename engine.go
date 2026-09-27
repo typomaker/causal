@@ -20,8 +20,8 @@ type preparedBinding struct {
 }
 
 type expressionExecution struct {
-	context   context.Context
-	functions map[string]functionCall
+	context  context.Context
+	bindings map[string]preparedBinding
 }
 
 // Do validates all bindings required by the complete root Case, then executes
@@ -140,11 +140,10 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) (map[strin
 			if b.function == nil || b.value.IsValid() {
 				return nil, fmt.Errorf("function symbol %q binding must be a function", b.name)
 			}
-			call, err := functionAdapter(c, b.function)
-			if err != nil {
+			if err := validateFunctionBinding(c, b.function.contract); err != nil {
 				return nil, err
 			}
-			m[b.name] = preparedBinding{Binding: b, call: call}
+			m[b.name] = preparedBinding{Binding: b, call: b.function.call}
 		} else {
 			if !b.value.IsValid() || b.function != nil {
 				return nil, fmt.Errorf("value symbol %q binding must be a non-nil pointer", b.name)
@@ -181,11 +180,7 @@ func (r *Runtime) eval(ctx context.Context, bound map[string]preparedBinding, se
 		activation[dep] = v
 	}
 	if len(ins.expr.functions) != 0 {
-		calls := make(map[string]functionCall, len(ins.expr.functions))
-		for _, name := range ins.expr.functions {
-			calls[name] = bound[name].call
-		}
-		activation[executionActivationName] = &expressionExecution{context: ctx, functions: calls}
+		activation[executionActivationName] = &expressionExecution{context: ctx, bindings: bound}
 	}
 	v, _, e := ins.expr.program.Eval(activation)
 	if e != nil {
@@ -224,27 +219,25 @@ func (r *Runtime) commit(ctx context.Context, s *Scope, bound map[string]prepare
 
 type functionCall func(context.Context, []ref.Val) ref.Val
 
-func functionAdapter(c symbolContract, fn any) (functionCall, error) {
+type boundFunction struct {
+	contract symbolContract
+	call     functionCall
+}
+
+func prepareFunction(name string, fn any) (*boundFunction, error) {
 	t := reflect.TypeOf(fn)
 	if t == nil {
-		return nil, fmt.Errorf("function symbol %q implementation has type %v, want %v", c.symbol.Name, t, c.goType)
+		return nil, fmt.Errorf("function symbol %q implementation has type %v", name, t)
 	}
-	if c.goType != nil {
-		if t != c.goType {
-			return nil, fmt.Errorf("function symbol %q implementation has type %v, want %v", c.symbol.Name, t, c.goType)
-		}
-	} else {
-		actual, err := contractForType(c.symbol.Name, t)
-		if err != nil || !actual.function || actual.result != c.result || !sameKinds(actual.args, c.args) {
-			return nil, fmt.Errorf("function symbol %q implementation has incompatible CEL signature", c.symbol.Name)
-		}
-		c.context, c.returnsError, c.nativeArgs = actual.context, actual.returnsError, actual.nativeArgs
+	c, err := contractForType(name, t)
+	if err != nil {
+		return nil, err
 	}
 	f := reflect.ValueOf(fn)
 	if f.IsNil() {
-		return nil, fmt.Errorf("function symbol %q implementation is nil", c.symbol.Name)
+		return nil, fmt.Errorf("function symbol %q implementation is nil", name)
 	}
-	return func(ctx context.Context, args []ref.Val) ref.Val {
+	call := func(ctx context.Context, args []ref.Val) ref.Val {
 		if len(args) != len(c.args) {
 			return types.NewErr("function %s: got %d arguments, want %d", c.symbol.Name, len(args), len(c.args))
 		}
@@ -265,7 +258,32 @@ func functionAdapter(c symbolContract, fn any) (functionCall, error) {
 			return types.NewErr("%s", out[1].Interface().(error))
 		}
 		return types.DefaultTypeAdapter.NativeToValue(out[0].Interface())
-	}, nil
+	}
+	return &boundFunction{contract: c, call: call}, nil
+}
+
+func validateFunctionBinding(expected, actual symbolContract) error {
+	if expected.goType != nil {
+		if actual.goType != expected.goType {
+			return fmt.Errorf("function symbol %q implementation has type %v, want %v", expected.symbol.Name, actual.goType, expected.goType)
+		}
+		return nil
+	}
+	if !actual.function || actual.result != expected.result || !sameKinds(actual.args, expected.args) {
+		return fmt.Errorf("function symbol %q implementation has incompatible CEL signature", expected.symbol.Name)
+	}
+	return nil
+}
+
+func functionAdapter(c symbolContract, fn any) (functionCall, error) {
+	bound, err := prepareFunction(c.symbol.Name, fn)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateFunctionBinding(c, bound.contract); err != nil {
+		return nil, err
+	}
+	return bound.call, nil
 }
 
 func nativeValue(value ref.Val, target reflect.Type) (any, error) {
