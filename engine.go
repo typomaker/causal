@@ -33,6 +33,7 @@ type preparedBinding struct {
 
 type expressionActivation struct {
 	runtime  *Runtime
+	compiled *compiledCase
 	context  context.Context
 	bindings []preparedBinding
 	segment  *segment
@@ -109,7 +110,7 @@ func (e *Execution) Do(ctx context.Context, scope *Scope) error {
 	}
 	scope.ready[name] = false
 	seg := r.segmentPool.Get().(*segment)
-	seg.activation = expressionActivation{runtime: r, bindings: bound, segment: seg}
+	seg.activation = expressionActivation{runtime: r, compiled: cc, bindings: bound, segment: seg}
 	defer r.releaseSegment(seg)
 	for pc < len(cc.code) {
 		if err := ctx.Err(); err != nil {
@@ -169,8 +170,8 @@ func (e *Execution) Do(ctx context.Context, scope *Scope) error {
 }
 
 func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) ([]preparedBinding, error) {
-	prepared := make([]preparedBinding, len(r.symbols))
-	for _, b := range items {
+	prepared := make([]preparedBinding, len(cc.requirementIndexes))
+	for itemIndex, b := range items {
 		if b.err != nil {
 			return nil, fmt.Errorf("invalid binding %q: %w", b.name, b.err)
 		}
@@ -181,10 +182,13 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) ([]prepare
 		if !ok {
 			return nil, fmt.Errorf("binding for undeclared symbol %q", b.name)
 		}
-		if prepared[index].set {
-			return nil, fmt.Errorf("duplicate binding %q", b.name)
+		for previous := range itemIndex {
+			if items[previous].name == b.name {
+				return nil, fmt.Errorf("duplicate binding %q", b.name)
+			}
 		}
 		c := r.symbols[index]
+		slot, required := cc.bindingSlots[index]
 		if c.function {
 			if b.function == nil || b.value.IsValid() {
 				return nil, fmt.Errorf("function symbol %q binding must be a function", b.name)
@@ -192,7 +196,9 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) ([]prepare
 			if err := validateFunctionBinding(c, b.function.contract); err != nil {
 				return nil, err
 			}
-			prepared[index] = preparedBinding{Binding: b, function: b.function, set: true}
+			if required {
+				prepared[slot] = preparedBinding{Binding: b, function: b.function, set: true}
+			}
 		} else {
 			if !b.value.IsValid() || b.function != nil {
 				return nil, fmt.Errorf("value symbol %q binding must be a non-nil pointer", b.name)
@@ -205,11 +211,13 @@ func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) ([]prepare
 			if converter == nil {
 				converter = nativeConverter(b.valueType)
 			}
-			prepared[index] = preparedBinding{Binding: b, toNative: converter, set: true}
+			if required {
+				prepared[slot] = preparedBinding{Binding: b, toNative: converter, set: true}
+			}
 		}
 	}
-	for _, index := range cc.requirementIndexes {
-		if !prepared[index].set {
+	for slot, index := range cc.requirementIndexes {
+		if !prepared[slot].set {
 			return nil, fmt.Errorf("missing binding for symbol %q", r.symbols[index].symbol.Name)
 		}
 	}
@@ -220,7 +228,7 @@ func (r *Runtime) eval(ctx context.Context, bound []preparedBinding, seg *segmen
 	for _, index := range ins.expr.readIndexes {
 		entry := &seg.values[index]
 		if !entry.hasPending && !entry.hasSnapshot {
-			entry.snapshot = bound[index].value.Elem().Interface()
+			entry.snapshot = bound[seg.activation.compiled.bindingSlots[index]].value.Elem().Interface()
 			entry.hasSnapshot = true
 		}
 	}
@@ -239,7 +247,11 @@ func (a *expressionActivation) ResolveName(name string) (any, bool) {
 		return a, true
 	}
 	index, ok := a.runtime.symbolIndexes[name]
-	if !ok || !a.bindings[index].set {
+	if !ok {
+		return nil, false
+	}
+	slot, ok := a.compiled.bindingSlots[index]
+	if !ok || !a.bindings[slot].set {
 		return nil, false
 	}
 	entry := &a.segment.values[index]
@@ -260,14 +272,15 @@ func (r *Runtime) commit(ctx context.Context, s *Scope, bound []preparedBinding,
 	}
 	for _, index := range seg.order {
 		entry := &seg.values[index]
-		native, err := bound[index].toNative(entry.pending)
+		binding := bound[seg.activation.compiled.bindingSlots[index]]
+		native, err := binding.toNative(entry.pending)
 		if err != nil {
-			return fmt.Errorf("causal: symbol %q: cannot assign CEL %s to %v Symbol", r.symbols[index].symbol.Name, entry.pending.Type(), bound[index].valueType)
+			return fmt.Errorf("causal: symbol %q: cannot assign CEL %s to %v Symbol", r.symbols[index].symbol.Name, entry.pending.Type(), binding.valueType)
 		}
 		entry.native = native
 	}
 	for _, index := range seg.order {
-		bound[index].value.Elem().Set(reflect.ValueOf(seg.values[index].native))
+		bound[seg.activation.compiled.bindingSlots[index]].value.Elem().Set(reflect.ValueOf(seg.values[index].native))
 	}
 	for _, index := range seg.order {
 		for _, c := range r.dependents[index] {

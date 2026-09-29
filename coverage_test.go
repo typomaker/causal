@@ -236,6 +236,49 @@ func TestSegmentPoolCleanupAndOrderCapacity(t *testing.T) {
 	}
 }
 
+func TestValidateBindingsUsesCaseLayout(t *testing.T) {
+	runtime, err := New(
+		Symbol[int64]("first"), Symbol[int64]("second"), Symbol[int64]("unused"),
+		Case("first_case", Skip("first > 0")),
+		Case("second_case", Skip("second > 0")),
+	).Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second, unused := int64(1), int64(2), int64(3)
+	bindings, err := runtime.validateBindings(runtime.cases["first_case"], []Binding{
+		Bind("first", &first), Bind("second", &second), Bind("unused", &unused),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("binding layout length=%d, want 1", len(bindings))
+	}
+	if bindings[0].name != "first" {
+		t.Fatalf("binding layout contains %q, want first", bindings[0].name)
+	}
+}
+
+func TestCaseBindingLayoutMapsFunctionIndexes(t *testing.T) {
+	runtime, err := New(
+		Symbol[int64]("before"), Symbol[func(int64) int64]("increment"), Symbol[int64]("value"),
+		Case("run", Self("value"), With("increment(value)")),
+	).Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := int64(1)
+	if err := runtime.Do(context.Background(), &Scope{}, "run",
+		Bind("value", &value), BindFunc1("increment", func(v int64) int64 { return v + 1 }),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if value != 2 {
+		t.Fatalf("value=%d, want 2", value)
+	}
+}
+
 func callBoundFunction(ctx context.Context, function *boundFunction, args []ref.Val) ref.Val {
 	switch function.typedArity {
 	case 0:

@@ -48,6 +48,7 @@ type compiledCase struct {
 	deps               map[string]struct{}
 	requirements       map[string]struct{}
 	requirementIndexes []int
+	bindingSlots       map[int]int
 }
 
 // Runtime is an immutable compiled program and is safe for concurrent use. Use
@@ -160,6 +161,10 @@ func compile(program Program) (*Runtime, error) {
 			cc.requirementIndexes = append(cc.requirementIndexes, symbolIndexes[name])
 		}
 		sort.Ints(cc.requirementIndexes)
+		cc.bindingSlots = make(map[int]int, len(cc.requirementIndexes))
+		for slot, index := range cc.requirementIndexes {
+			cc.bindingSlots[index] = slot
+		}
 		for i := range cc.code {
 			ins := &cc.code[i]
 			if ins.target != "" {
@@ -422,10 +427,11 @@ func (c *dynamicFunctionCall) Eval(activation interpreter.Activation) ref.Val {
 	if !ok {
 		return types.NewErr("causal: invalid function activation")
 	}
-	if c.index < 0 || c.index >= len(execution.bindings) || !execution.bindings[c.index].set || execution.bindings[c.index].function == nil {
+	slot, required := execution.compiled.bindingSlots[c.index]
+	if c.index < 0 || !required || !execution.bindings[slot].set || execution.bindings[slot].function == nil {
 		return types.NewErr("causal: missing function %s", c.name)
 	}
-	function := execution.bindings[c.index].function
+	function := execution.bindings[slot].function
 	if function.typedArity >= 0 {
 		return c.evalTyped(execution.context, function, activation)
 	}
