@@ -49,8 +49,8 @@ type With struct{ Expression string }
 // Skip{Expression: "energy < 5"}.
 type Skip struct{ Expression string }
 
-// Wait commits staged writes and suspends execution for a CEL duration; for
-// example, Wait{Expression: `duration("3s")`}.
+// Wait commits staged writes and suspends execution for a CEL duration or
+// until an absolute CEL timestamp.
 type Wait struct{ Expression string }
 
 // CaseRef includes a named case decoded from JSON; for example,

@@ -234,8 +234,8 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, symbo
 			if e != nil {
 				return self, e
 			}
-			if outputType(a) != cel.DurationType {
-				return self, fmt.Errorf("Wait %q must return duration, got %v", s.Expression, outputType(a))
+			if outputType(a) != cel.DurationType && outputType(a) != cel.TimestampType {
+				return self, fmt.Errorf("Wait %q must return duration or timestamp, got %v", s.Expression, outputType(a))
 			}
 			for _, name := range a.reads {
 				deps[name] = struct{}{}

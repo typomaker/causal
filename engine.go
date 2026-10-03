@@ -8,6 +8,7 @@ import (
 	"github.com/google/cel-go/common/types/traits"
 	"github.com/google/cel-go/interpreter"
 	"reflect"
+	"time"
 )
 
 type segment struct {
@@ -147,17 +148,22 @@ func (e *Execution) Do(ctx context.Context, scope *Scope) error {
 			if e != nil {
 				return fmt.Errorf("causal: case %q Wait %q: %w", name, ins.source, e)
 			}
-			d, ok := v.(types.Duration)
-			if !ok {
-				return fmt.Errorf("causal: Wait %q returned %s, want duration", ins.source, v.Type())
-			}
-			if d.Duration < 0 {
-				return fmt.Errorf("causal: Wait %q returned negative duration", ins.source)
+			var availableAt time.Time
+			switch wait := v.(type) {
+			case types.Duration:
+				if wait.Duration < 0 {
+					return fmt.Errorf("causal: Wait %q returned negative duration", ins.source)
+				}
+				availableAt = scope.clock().Add(wait.Duration)
+			case types.Timestamp:
+				availableAt = wait.Time
+			default:
+				return fmt.Errorf("causal: Wait %q returned %s, want duration or timestamp", ins.source, v.Type())
 			}
 			if e := r.commit(ctx, scope, bound, seg); e != nil {
 				return e
 			}
-			scope.continuations[name] = continuation{RootCase: name, PC: pc + 1, AvailableAt: scope.clock().Add(d.Duration), Version: r.version}
+			scope.continuations[name] = continuation{RootCase: name, PC: pc + 1, AvailableAt: availableAt, Version: r.version}
 			return nil
 		}
 		pc++

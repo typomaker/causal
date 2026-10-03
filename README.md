@@ -207,7 +207,8 @@ must remain unique. A complete, executable version is maintained as an
 
 `Skip` conditionally exits the current case. `Wait` commits the current segment,
 stores a continuation in `Scope`, and returns. Calling `Do` again resumes after
-the delay has elapsed according to the scope clock.
+the delay has elapsed according to the scope clock. The expression may return
+a relative `duration` or an absolute `timestamp`.
 
 ```go
 causal.Case("attack",
@@ -217,6 +218,12 @@ causal.Case("attack",
     causal.Wait(`duration("3s")`),
     causal.With("max(0, health - damage)"),
 )
+```
+
+For an absolute deadline, use a CEL timestamp:
+
+```go
+causal.Wait(`timestamp("2026-10-03T12:00:00Z")`)
 ```
 
 `Do` validates the binding contract for the complete root case before executing

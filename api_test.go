@@ -332,6 +332,40 @@ func TestPointerStagingSegments(t *testing.T) {
 		}
 	})
 
+	t.Run("Wait accepts an absolute timestamp", func(t *testing.T) {
+		now := time.Date(2026, time.October, 3, 11, 0, 0, 0, time.UTC)
+		deadline := now.Add(time.Hour)
+		value := int64(0)
+		program := causal.New(causal.Symbol[int64]("value"), causal.Case("run",
+			causal.Self("value"), causal.With("value + 1"),
+			causal.Wait(`timestamp("2026-10-03T12:00:00Z")`),
+			causal.With("value + 1"),
+		))
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scope causal.Scope
+		scope.SetClock(func() time.Time { return now })
+		binding := causal.Bind("value", &value)
+		if err := runtime.Do(context.Background(), &scope, "run", binding); err != nil {
+			t.Fatal(err)
+		}
+		if pending, ok := scope.Pending("run"); !ok || !pending.Equal(deadline) {
+			t.Fatalf("pending deadline=%s exists=%t, want %s", pending, ok, deadline)
+		}
+		if value != 1 {
+			t.Fatalf("committed value=%d, want 1", value)
+		}
+		now = deadline
+		if err := runtime.Do(context.Background(), &scope, "run", binding); err != nil {
+			t.Fatal(err)
+		}
+		if value != 2 {
+			t.Fatalf("resumed value=%d, want 2", value)
+		}
+	})
+
 	t.Run("validation does not invoke functions", func(t *testing.T) {
 		calls := 0
 		program := causal.New(

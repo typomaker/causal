@@ -97,9 +97,11 @@ func With(expr string) Statement { return ast.With{Expression: expr} }
 //	causal.Skip("energy < 5")
 func Skip(expr string) Statement { return ast.Skip{Expression: expr} }
 
-// Wait commits staged values and suspends the root Case for a CEL duration:
+// Wait commits staged values and suspends the root Case for a CEL duration or
+// until an absolute CEL timestamp:
 //
 //	causal.Wait(`duration("3s")`)
+//	causal.Wait(`timestamp("2026-10-03T12:00:00Z")`)
 func Wait(expr string) Statement { return ast.Wait{Expression: expr} }
 
 // Compile validates the program and creates an immutable Runtime:
