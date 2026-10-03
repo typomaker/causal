@@ -31,6 +31,7 @@ type instruction struct {
 	targetIndex    int
 	expr           *compiledExpr
 	jump           int
+	timestampWait  bool
 }
 
 // compiledExpr contains all immutable work needed to evaluate one expression.
@@ -240,7 +241,12 @@ func compileStatements(env *cel.Env, c ast.Case, defs map[string]ast.Case, symbo
 			for _, name := range a.reads {
 				deps[name] = struct{}{}
 			}
-			*code = append(*code, instruction{kind: instWait, source: s.Expression, expr: a})
+			*code = append(*code, instruction{
+				kind:          instWait,
+				source:        s.Expression,
+				expr:          a,
+				timestampWait: outputType(a) == cel.TimestampType,
+			})
 		case ast.Case:
 			var e error
 			self, e = compileStatements(env, s, defs, symbolIndexes, code, deps, req, self, append(path, s.Name))

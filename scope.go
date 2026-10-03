@@ -50,6 +50,7 @@ func Bind(name string, implementation any) Binding {
 type continuation struct {
 	RootCase    string    `json:"rootCase"`
 	PC          int       `json:"programCounter"`
+	WaitStarted time.Time `json:"waitStartedAt,omitempty"`
 	AvailableAt time.Time `json:"availableAt"`
 	Version     string    `json:"runtimeVersion"`
 }

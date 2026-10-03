@@ -238,6 +238,12 @@ program := causal.New(
 binding := causal.Bind("deadline", &deadline)
 ```
 
+While a wait is pending, every `Do` call evaluates its expression again.
+Changing a timestamp reschedules the continuation, or resumes it immediately
+when the new deadline has passed. A changed duration is applied to the saved
+time at which the wait began, so repeated calls do not shift the starting point.
+A zero `time.Time` is rejected.
+
 `Do` validates the binding contract for the complete root case before executing
 anything, including when it resumes after `Wait`.
 

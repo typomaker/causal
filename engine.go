@@ -101,9 +101,37 @@ func (e *Execution) Do(ctx context.Context, scope *Scope) error {
 	scope.runtimeVersion = r.version
 	pc := 0
 	if c, ok := scope.continuations[name]; ok {
-		if c.Version != r.version || c.RootCase != name || c.PC < 0 || c.PC >= len(cc.code) {
+		if c.Version != r.version || c.RootCase != name || c.PC <= 0 || c.PC >= len(cc.code) || cc.code[c.PC-1].kind != instWait {
 			return fmt.Errorf("causal: invalid continuation for %q", name)
 		}
+		wait := cc.code[c.PC-1]
+		value, err := r.reevaluateWait(ctx, cc, bound, wait)
+		if err != nil {
+			return fmt.Errorf("causal: case %q Wait %q: %w", name, wait.source, err)
+		}
+		if wait.timestampWait {
+			timestamp, ok := value.(types.Timestamp)
+			if !ok {
+				return fmt.Errorf("causal: case %q Wait %q returned %s, want timestamp", name, wait.source, value.Type())
+			}
+			if timestamp.IsZero() {
+				return fmt.Errorf("causal: case %q Wait %q returned zero timestamp", name, wait.source)
+			}
+			c.AvailableAt = timestamp.Time
+		} else {
+			duration, ok := value.(types.Duration)
+			if !ok {
+				return fmt.Errorf("causal: case %q Wait %q returned %s, want duration", name, wait.source, value.Type())
+			}
+			if duration.Duration < 0 {
+				return fmt.Errorf("causal: case %q Wait %q returned negative duration", name, wait.source)
+			}
+			if c.WaitStarted.IsZero() {
+				c.WaitStarted = c.AvailableAt.Add(-duration.Duration)
+			}
+			c.AvailableAt = c.WaitStarted.Add(duration.Duration)
+		}
+		scope.continuations[name] = c
 		if scope.clock().Before(c.AvailableAt) {
 			return nil
 		}
@@ -148,14 +176,18 @@ func (e *Execution) Do(ctx context.Context, scope *Scope) error {
 			if e != nil {
 				return fmt.Errorf("causal: case %q Wait %q: %w", name, ins.source, e)
 			}
+			startedAt := scope.clock()
 			var availableAt time.Time
 			switch wait := v.(type) {
 			case types.Duration:
 				if wait.Duration < 0 {
 					return fmt.Errorf("causal: Wait %q returned negative duration", ins.source)
 				}
-				availableAt = scope.clock().Add(wait.Duration)
+				availableAt = startedAt.Add(wait.Duration)
 			case types.Timestamp:
+				if wait.IsZero() {
+					return fmt.Errorf("causal: Wait %q returned zero timestamp", ins.source)
+				}
 				availableAt = wait.Time
 			default:
 				return fmt.Errorf("causal: Wait %q returned %s, want duration or timestamp", ins.source, v.Type())
@@ -163,7 +195,7 @@ func (e *Execution) Do(ctx context.Context, scope *Scope) error {
 			if e := r.commit(ctx, scope, bound, seg); e != nil {
 				return e
 			}
-			scope.continuations[name] = continuation{RootCase: name, PC: pc + 1, AvailableAt: availableAt, Version: r.version}
+			scope.continuations[name] = continuation{RootCase: name, PC: pc + 1, WaitStarted: startedAt, AvailableAt: availableAt, Version: r.version}
 			return nil
 		}
 		pc++
@@ -173,6 +205,17 @@ func (e *Execution) Do(ctx context.Context, scope *Scope) error {
 	}
 	delete(scope.continuations, name)
 	return nil
+}
+
+func (r *Runtime) reevaluateWait(ctx context.Context, cc *compiledCase, bound []preparedBinding, ins instruction) (ref.Val, error) {
+	seg := r.segmentPool.Get().(*segment)
+	seg.activation = expressionActivation{runtime: r, compiled: cc, bindings: bound, segment: seg}
+	defer r.releaseSegment(seg)
+	v, err := r.eval(ctx, bound, seg, ins)
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
 func (r *Runtime) validateBindings(cc *compiledCase, items []Binding) ([]preparedBinding, error) {

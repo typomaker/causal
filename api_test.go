@@ -466,6 +466,153 @@ func TestScopeJSONContinuation(t *testing.T) {
 	}
 }
 
+func TestWaitReevaluation(t *testing.T) {
+	newRuntime := func(t *testing.T) *causal.Runtime {
+		t.Helper()
+		program := causal.New(
+			causal.Symbol[time.Time]("deadline"),
+			causal.Symbol[int64]("value"),
+			causal.Case("run", causal.Wait("deadline"), causal.Self("value"), causal.With("value + 1")),
+		)
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return runtime
+	}
+
+	t.Run("changed deadline reschedules and can resume immediately", func(t *testing.T) {
+		now := time.Date(2026, time.October, 3, 12, 0, 0, 0, time.UTC)
+		deadline := now.Add(time.Hour)
+		value := int64(0)
+		runtime := newRuntime(t)
+		bindings := []causal.Binding{causal.Bind("deadline", &deadline), causal.Bind("value", &value)}
+		var scope causal.Scope
+		scope.SetClock(func() time.Time { return now })
+
+		if err := runtime.Do(context.Background(), &scope, "run", bindings...); err != nil {
+			t.Fatal(err)
+		}
+		deadline = now.Add(2 * time.Hour)
+		if err := runtime.Do(context.Background(), &scope, "run", bindings...); err != nil {
+			t.Fatal(err)
+		}
+		if pending, ok := scope.Pending("run"); !ok || !pending.Equal(deadline) {
+			t.Fatalf("rescheduled deadline=%s exists=%t, want %s", pending, ok, deadline)
+		}
+		if value != 0 {
+			t.Fatalf("value=%d before deadline, want 0", value)
+		}
+
+		deadline = now.Add(-time.Second)
+		if err := runtime.Do(context.Background(), &scope, "run", bindings...); err != nil {
+			t.Fatal(err)
+		}
+		if value != 1 {
+			t.Fatalf("value=%d after elapsed replacement deadline, want 1", value)
+		}
+		if _, ok := scope.Pending("run"); ok {
+			t.Fatal("completed case remains pending")
+		}
+	})
+
+	t.Run("changed duration uses original wait start", func(t *testing.T) {
+		now := time.Date(2026, time.October, 3, 12, 0, 0, 0, time.UTC)
+		delay := 15 * time.Second
+		value := int64(0)
+		program := causal.New(
+			causal.Symbol[time.Duration]("delay"),
+			causal.Symbol[int64]("value"),
+			causal.Case("run", causal.Wait("delay"), causal.Self("value"), causal.With("value + 1")),
+		)
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		bindings := []causal.Binding{causal.Bind("delay", &delay), causal.Bind("value", &value)}
+		var scope causal.Scope
+		scope.SetClock(func() time.Time { return now })
+		if err := runtime.Do(context.Background(), &scope, "run", bindings...); err != nil {
+			t.Fatal(err)
+		}
+		startedAt := now
+		now = now.Add(5 * time.Second)
+		delay = 10 * time.Second
+		if err := runtime.Do(context.Background(), &scope, "run", bindings...); err != nil {
+			t.Fatal(err)
+		}
+		want := startedAt.Add(delay)
+		if pending, ok := scope.Pending("run"); !ok || !pending.Equal(want) {
+			t.Fatalf("duration deadline=%s exists=%t, want %s", pending, ok, want)
+		}
+		now = startedAt.Add(11 * time.Second)
+		if err := runtime.Do(context.Background(), &scope, "run", bindings...); err != nil {
+			t.Fatal(err)
+		}
+		if value != 1 {
+			t.Fatalf("value=%d after shortened duration elapsed, want 1", value)
+		}
+	})
+
+	t.Run("zero timestamp is rejected", func(t *testing.T) {
+		deadline := time.Time{}
+		value := int64(0)
+		var scope causal.Scope
+		err := newRuntime(t).Do(context.Background(), &scope, "run",
+			causal.Bind("deadline", &deadline), causal.Bind("value", &value))
+		if err == nil || !strings.Contains(err.Error(), "zero timestamp") {
+			t.Fatalf("error=%v, want zero timestamp error", err)
+		}
+	})
+
+	t.Run("zero replacement timestamp is rejected", func(t *testing.T) {
+		now := time.Date(2026, time.October, 3, 12, 0, 0, 0, time.UTC)
+		deadline := now.Add(time.Hour)
+		value := int64(0)
+		runtime := newRuntime(t)
+		bindings := []causal.Binding{causal.Bind("deadline", &deadline), causal.Bind("value", &value)}
+		var scope causal.Scope
+		scope.SetClock(func() time.Time { return now })
+		if err := runtime.Do(context.Background(), &scope, "run", bindings...); err != nil {
+			t.Fatal(err)
+		}
+		deadline = time.Time{}
+		err := runtime.Do(context.Background(), &scope, "run", bindings...)
+		if err == nil || !strings.Contains(err.Error(), "zero timestamp") {
+			t.Fatalf("error=%v, want zero timestamp error", err)
+		}
+	})
+
+	t.Run("restored scope reevaluates binding", func(t *testing.T) {
+		now := time.Date(2026, time.October, 3, 12, 0, 0, 0, time.UTC)
+		deadline := now.Add(time.Hour)
+		value := int64(0)
+		runtime := newRuntime(t)
+		bindings := []causal.Binding{causal.Bind("deadline", &deadline), causal.Bind("value", &value)}
+		var scope causal.Scope
+		scope.SetClock(func() time.Time { return now })
+		if err := runtime.Do(context.Background(), &scope, "run", bindings...); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(&scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var restored causal.Scope
+		if err := json.Unmarshal(data, &restored); err != nil {
+			t.Fatal(err)
+		}
+		restored.SetClock(func() time.Time { return now })
+		deadline = now.Add(3 * time.Hour)
+		if err := runtime.Do(context.Background(), &restored, "run", bindings...); err != nil {
+			t.Fatal(err)
+		}
+		if pending, ok := restored.Pending("run"); !ok || !pending.Equal(deadline) {
+			t.Fatalf("restored deadline=%s exists=%t, want %s", pending, ok, deadline)
+		}
+	})
+}
+
 func TestArbitraryFunctionSymbolSignature(t *testing.T) {
 	value := ""
 	p := causal.New(
