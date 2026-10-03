@@ -50,7 +50,9 @@ type With struct{ Expression string }
 type Skip struct{ Expression string }
 
 // Wait commits staged writes and suspends execution for a CEL duration or
-// until an absolute CEL timestamp.
+// until an absolute CEL timestamp. Its expression is reevaluated on subsequent
+// executions while pending; changed durations remain anchored to the original
+// wait start time.
 type Wait struct{ Expression string }
 
 // CaseRef includes a named case decoded from JSON; for example,

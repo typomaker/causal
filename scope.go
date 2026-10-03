@@ -102,8 +102,10 @@ func (s *Scope) SetClock(c Clock) {
 	}
 }
 
-// Pending reports the deadline of a suspended root case. Applications use it
-// to persist and schedule a continuation without interpreting Scope JSON.
+// Pending reports the currently calculated deadline of a suspended root case.
+// A later [Runtime.Do] may update it after reevaluating the Wait expression.
+// Applications use it to persist and schedule a continuation without
+// interpreting Scope JSON.
 //
 //	if deadline, ok := scope.Pending("attack"); ok {
 //		scheduler.Enqueue("attack", deadline)

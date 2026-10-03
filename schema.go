@@ -102,6 +102,18 @@ func Skip(expr string) Statement { return ast.Skip{Expression: expr} }
 //
 //	causal.Wait(`duration("3s")`)
 //	causal.Wait(`timestamp("2026-10-03T12:00:00Z")`)
+//
+// Pending waits evaluate expr again on every [Runtime.Do]. A changed timestamp
+// replaces the absolute deadline. A changed duration is still measured from
+// the original time at which the wait began, so polling does not extend it:
+//
+//	delay := 15 * time.Second
+//	program := causal.New(
+//		causal.Symbol[time.Duration]("delay"),
+//		causal.Case("job", causal.Wait("delay")),
+//	)
+//	// If delay becomes 10 seconds after the first Do, the deadline becomes
+//	// waitStartedAt + 10 seconds, rather than the current time + 10 seconds.
 func Wait(expr string) Statement { return ast.Wait{Expression: expr} }
 
 // Compile validates the program and creates an immutable Runtime:

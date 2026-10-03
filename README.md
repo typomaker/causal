@@ -244,6 +244,42 @@ when the new deadline has passed. A changed duration is applied to the saved
 time at which the wait began, so repeated calls do not shift the starting point.
 A zero `time.Time` is rejected.
 
+For example, an application can shorten a pending duration without resetting
+its starting point:
+
+```go
+delay := 15 * time.Second
+program := causal.New(
+    causal.Symbol[time.Duration]("delay"),
+    causal.Case("job", causal.Wait("delay")),
+)
+runtime, err := program.Compile()
+if err != nil {
+    return err
+}
+
+binding := causal.Bind("delay", &delay)
+var scope causal.Scope
+
+// Starts the wait and stores waitStartedAt + 15 seconds as its deadline.
+if err := runtime.Do(ctx, &scope, "job", binding); err != nil {
+    return err
+}
+
+delay = 10 * time.Second
+
+// Recalculates the deadline as the original waitStartedAt + 10 seconds.
+// If that deadline has already passed, this call continues the case now.
+if err := runtime.Do(ctx, &scope, "job", binding); err != nil {
+    return err
+}
+```
+
+The same applies to timestamps: update the bound `time.Time` and call `Do`
+again. `Pending` then reports the recalculated deadline. Marshaling `Scope`
+preserves the original duration start time and the continuation; after restoring
+it, the next `Do` reevaluates the expression from the current bindings.
+
 `Do` validates the binding contract for the complete root case before executing
 anything, including when it resumes after `Wait`.
 
