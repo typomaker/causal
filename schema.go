@@ -63,8 +63,8 @@ func New(items ...Declaration) Program {
 }
 
 // Symbol declares a value or function available to CEL expressions. Supported
-// value types include bool, string, int64, uint64, float64, time.Duration, and
-// slices or arrays of supported value types:
+// value types include bool, string, int64, uint64, float64, time.Duration,
+// time.Time, and slices or arrays of supported value types:
 //
 //	health := causal.Symbol[int64]("health")
 //	lookup := causal.Symbol[func(context.Context, string) (int64, error)]("lookup")
@@ -224,7 +224,7 @@ func contractFromAST(symbol ast.Symbol) (symbolContract, error) {
 
 func validKind(kind string) bool {
 	switch kind {
-	case "bool", "string", "int", "uint", "double", "duration":
+	case "bool", "string", "int", "uint", "double", "duration", "timestamp":
 		return true
 	}
 	_, ok := listElementKind(kind)
@@ -246,6 +246,7 @@ func listElementKind(kind string) (string, bool) {
 var contextType = reflect.TypeFor[context.Context]()
 var errorType = reflect.TypeFor[error]()
 var durationType = reflect.TypeFor[time.Duration]()
+var timeType = reflect.TypeFor[time.Time]()
 
 func kindForType(t reflect.Type) (string, bool) {
 	switch t {
@@ -261,6 +262,8 @@ func kindForType(t reflect.Type) (string, bool) {
 		return "double", true
 	case durationType:
 		return "duration", true
+	case timeType:
+		return "timestamp", true
 	}
 	switch t.Kind() {
 	case reflect.Bool:

@@ -422,6 +422,10 @@ func nativeValue(value ref.Val, target reflect.Type) (any, error) {
 		if v, ok := value.(types.Duration); ok {
 			return v.Duration, nil
 		}
+	case timeType:
+		if v, ok := value.(types.Timestamp); ok {
+			return v.Time, nil
+		}
 	}
 	if target.Kind() != reflect.Array {
 		return value.ConvertToNative(target)

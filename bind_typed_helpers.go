@@ -62,6 +62,8 @@ func typedResult[T any](result T, err error) ref.Val {
 		return types.Double(value)
 	case time.Duration:
 		return types.Duration{Duration: value}
+	case time.Time:
+		return types.Timestamp{Time: value}
 	}
 	return types.DefaultTypeAdapter.NativeToValue(result)
 }

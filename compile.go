@@ -301,6 +301,8 @@ func celType(k string) *cel.Type {
 		return cel.DoubleType
 	case "duration":
 		return cel.DurationType
+	case "timestamp":
+		return cel.TimestampType
 	}
 	return cel.DynType
 }

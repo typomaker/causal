@@ -366,6 +366,35 @@ func TestPointerStagingSegments(t *testing.T) {
 		}
 	})
 
+	t.Run("Wait accepts a time.Time symbol", func(t *testing.T) {
+		now := time.Date(2026, time.October, 3, 11, 0, 0, 0, time.UTC)
+		deadline := now.Add(time.Hour)
+		want := deadline.Add(30 * time.Minute)
+		program := causal.New(
+			causal.Symbol[time.Time]("deadline"),
+			causal.Case("run",
+				causal.Self("deadline"),
+				causal.With(`deadline + duration("30m")`),
+				causal.Wait("deadline"),
+			),
+		)
+		runtime, err := program.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scope causal.Scope
+		scope.SetClock(func() time.Time { return now })
+		if err := runtime.Do(context.Background(), &scope, "run", causal.Bind("deadline", &deadline)); err != nil {
+			t.Fatal(err)
+		}
+		if pending, ok := scope.Pending("run"); !ok || !pending.Equal(want) {
+			t.Fatalf("pending deadline=%s exists=%t, want %s", pending, ok, want)
+		}
+		if !deadline.Equal(want) {
+			t.Fatalf("committed deadline=%s, want %s", deadline, want)
+		}
+	})
+
 	t.Run("validation does not invoke functions", func(t *testing.T) {
 		calls := 0
 		program := causal.New(

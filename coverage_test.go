@@ -15,13 +15,13 @@ import (
 )
 
 func TestStaticKindsAndContracts(t *testing.T) {
-	decls := []Declaration{Symbol[bool]("b"), Symbol[string]("s"), Symbol[int64]("i"), Symbol[uint64]("u"), Symbol[float64]("f"), Symbol[time.Duration]("d"), Symbol[struct{}]("bad")}
-	for i, d := range decls[:6] {
+	decls := []Declaration{Symbol[bool]("b"), Symbol[string]("s"), Symbol[int64]("i"), Symbol[uint64]("u"), Symbol[float64]("f"), Symbol[time.Duration]("d"), Symbol[time.Time]("t"), Symbol[struct{}]("bad")}
+	for i, d := range decls[:7] {
 		if d.(symbolDeclaration).contract.err != nil {
 			t.Fatal(i)
 		}
 	}
-	if decls[6].(symbolDeclaration).contract.err == nil {
+	if decls[7].(symbolDeclaration).contract.err == nil {
 		t.Fatal("unsupported type")
 	}
 	if kind, ok := kindForType(reflect.TypeFor[bool]()); !ok || kind != "bool" {
@@ -33,6 +33,8 @@ func TestAllFunctionAdapters(t *testing.T) {
 	ctx := context.Background()
 	i := types.Int(2)
 	f := types.Double(2)
+	now := time.Date(2026, time.October, 3, 12, 0, 0, 0, time.UTC)
+	ts := types.Timestamp{Time: now}
 	tests := []struct {
 		decl Declaration
 		fn   any
@@ -50,6 +52,7 @@ func TestAllFunctionAdapters(t *testing.T) {
 		{Symbol[func(context.Context, float64, float64) float64]("x"), func(context.Context, float64, float64) float64 { return 4 }, []ref.Val{f, f}},
 		{Symbol[func(float64, float64) (float64, error)]("x"), func(x, y float64) (float64, error) { return x + y, nil }, []ref.Val{f, f}},
 		{Symbol[func(context.Context, float64, float64) (float64, error)]("x"), func(context.Context, float64, float64) (float64, error) { return 4, nil }, []ref.Val{f, f}},
+		{Symbol[func(time.Time) time.Time]("x"), func(value time.Time) time.Time { return value.Add(time.Hour) }, []ref.Val{ts}},
 	}
 	for n, tt := range tests {
 		c := tt.decl.(symbolDeclaration).contract
@@ -162,7 +165,7 @@ func TestTypedFunctionBindings(t *testing.T) {
 	for _, result := range []ref.Val{
 		typedResult(true, nil), typedResult("x", nil), typedResult(int64(1), nil),
 		typedResult(uint64(1), nil), typedResult(float64(1), nil),
-		typedResult(time.Second, nil), typedResult([]int64{1}, nil),
+		typedResult(time.Second, nil), typedResult(time.Unix(1, 0), nil), typedResult([]int64{1}, nil),
 	} {
 		if types.IsError(result) {
 			t.Fatal(result)
@@ -445,7 +448,7 @@ func TestFunctionContractValidation(t *testing.T) {
 	if _, err := functionAdapter(c, nilFn); err == nil {
 		t.Fatal("accepted nil function")
 	}
-	for _, kind := range []string{"bool", "string", "int", "uint", "double", "duration"} {
+	for _, kind := range []string{"bool", "string", "int", "uint", "double", "duration", "timestamp"} {
 		if !validKind(kind) {
 			t.Fatal(kind)
 		}

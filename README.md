@@ -226,6 +226,18 @@ For an absolute deadline, use a CEL timestamp:
 causal.Wait(`timestamp("2026-10-03T12:00:00Z")`)
 ```
 
+A Go `time.Time` symbol is exposed to CEL as a `timestamp`, so an application
+can provide the deadline as a binding:
+
+```go
+deadline := time.Now().Add(time.Hour)
+program := causal.New(
+    causal.Symbol[time.Time]("deadline"),
+    causal.Case("job", causal.Wait("deadline")),
+)
+binding := causal.Bind("deadline", &deadline)
+```
+
 `Do` validates the binding contract for the complete root case before executing
 anything, including when it resumes after `Wait`.
 
@@ -326,9 +338,9 @@ and `causal.Program` support `encoding/json`.
 
 The optional global `@symbol` object makes a JSON program independently
 compilable. Value symbols use CEL type names: `bool`, `string`, `int`, `uint`,
-`double`, and `duration`. Lists use `list<T>`, including nested forms such as
-`list<list<int>>`. JSON without `@symbol` can be composed with Go symbol
-declarations through `causal.New`.
+`double`, `duration`, and `timestamp`. Lists use `list<T>`, including nested
+forms such as `list<list<int>>`. JSON without `@symbol` can be composed with Go
+symbol declarations through `causal.New`.
 
 Compiled CEL, Go implementations, bindings, and continuations are never included
 in the program JSON.
